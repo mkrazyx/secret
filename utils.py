@@ -428,7 +428,40 @@ def get_size(size):
 
 def split_list(l, n):
     for i in range(0, len(l), n):
-        yield l[i:i + n]  
+        yield l[i:i + n]
+
+
+# ==================== RESULT NAME FORMATTING ====================
+
+# A word starts at a letter that is not glued to a digit/letter before it, so "1080p" and "2160p" are never touched.
+_WORD_RE = re.compile(r"(?<![\w'])[^\W\d_][\w']*")
+_EPISODE_RE = re.compile(r"s\d{1,2}(?:e\d{1,3})?", re.I)
+# A standalone year 1900-2099. Not wrapped when it is already in ( ) or [ ], when a letter/digit touches it
+# (1080p, 2160p, 1920x1080, x1999) or when it is part of a range like 2024-25.
+_YEAR_RE = re.compile(r"(?<![\w(\[])(?<!\d-)((?:19|20)\d{2})(?![\w)\]]|-\d)")
+_WRAPPED_YEAR_RE = re.compile(r"[(\[](?:19|20)\d{2}[)\]]")
+
+
+def pretty_name(name):
+    """'avatar the way of water 2022 1080p hindi s01e02' -> 'Avatar The Way Of Water (2022) 1080p Hindi S01E02'"""
+
+    def capitalise(m):
+        word = m.group(0)
+        if _EPISODE_RE.fullmatch(word):
+            return word.upper()
+        if any(ch.isdigit() for ch in word):
+            return word                      # x264, 10bit, ddp5 ... stay as written
+        return word[0].upper() + word[1:]    # only the first letter changes, WEBRip stays WEBRip
+
+    text = _WORD_RE.sub(capitalise, name or "")
+
+    hits = [] if _WRAPPED_YEAR_RE.search(text) else list(_YEAR_RE.finditer(text))   # a wrapped year means it is done
+    if hits:
+        last = hits[-1]
+        lone_title = len(hits) == 1 and not text[:last.start()].strip()   # "2012 1080p": the year is the title
+        if not lone_title:
+            text = f"{text[:last.start()]}({last.group(1)}){text[last.end():]}"
+    return text
 
 def get_file_id(msg: Message):
     if msg.media:
