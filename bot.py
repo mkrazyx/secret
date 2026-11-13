@@ -1,33 +1,30 @@
-import logging
-import logging.config
 import asyncio
+import logging
+import sys
+from datetime import date, datetime
 
-# Get logging configurations
-logging.config.fileConfig('logging.conf')
-logging.getLogger().setLevel(logging.INFO)
+# Logging (replaces logging.conf): INFO and up on the console, ERROR and up in TelegramBot.log.
+# The /logs command sends TelegramBot.log, so keep that file name.
+console = logging.StreamHandler(sys.stdout)
+console.setLevel(logging.INFO)
+console.setFormatter(logging.Formatter(
+    "%(asctime)s - %(lineno)d - %(name)s - %(module)s - %(levelname)s - %(message)s", "%I:%M:%S %p"))
+errors_file = logging.FileHandler("TelegramBot.log", "w")
+errors_file.setLevel(logging.ERROR)
+errors_file.setFormatter(logging.Formatter(
+    "[%(asctime)s:%(name)s:%(lineno)d:%(levelname)s] %(message)s", "%m/%d/%Y %I:%M:%S %p"))
+logging.basicConfig(level=logging.INFO, handlers=[console, errors_file], force=True)
 logging.getLogger("pyrogram").setLevel(logging.ERROR)
- 
-from plugins.index import check_pending_index_on_startup
-from pyrogram import Client, __version__
-from pyrogram.raw.all import layer
-from plugins.index import Media
-from utils import db
-from utils import temp, close_http_session
-from datetime import date, datetime 
+
 import pytz
 from aiohttp import web
+from pyrogram import Client, __version__
+from pyrogram.raw.all import layer
+
+from info import *
 from plugins import web_server
-from info import (
-    SESSION,
-    API_ID,
-    API_HASH,
-    BOT_TOKEN,
-    LOG_CHANNEL,
-    PORT,
-    RESTART_TXT,
-    LOGO,
-    ADMINS,
-)
+from plugins.index import Media, check_pending_index_on_startup
+from utils import close_http_session, db, temp
 
 OWNER_ID = ADMINS[0]
 class Bot(Client):
