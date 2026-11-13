@@ -13,6 +13,4 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY . .
 
-RUN chmod +x start.sh
-
-CMD ["./start.sh"]
+CMD ["python3", "bot.py"]
