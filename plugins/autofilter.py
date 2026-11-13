@@ -7,10 +7,10 @@ from html import escape
 from pyrogram import Client, enums, filters
 from pyrogram.errors import MessageNotModified
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from database.ia_filterdb import Media, get_bad_files, get_file_details, get_search_results
-from database.users_chats_db import db
+from plugins.index import Media, get_bad_files, get_file_details, get_search_results
+from utils import db
 from info import *
-from utils import get_settings, get_shortlink, get_size, is_group_connected, is_subscribed, search_gagala, temp
+from utils import get_settings, get_shortlink, get_size, is_group_connected, is_subscribed, pretty_name, search_gagala, temp
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)
@@ -102,7 +102,7 @@ def build_results_caption(chat_id, search, files):
     )
 
     for file in files:
-        title = file.file_name or ""
+        title = pretty_name(file.file_name or "")
         cap += (
             f"🍿 <a href=\"https://telegram.me/{temp.U_NAME}"
             f"?start=files_{chat_id}_{file.file_id}\">"
@@ -333,12 +333,6 @@ async def auto_filter(client, msg, spoll=False):
             search,
             flags=re.IGNORECASE,
         )
-
-        for lang, code in [
-            ("english", "eng"), ("hindi", "hin"), ("tamil", "tam"),
-            ("telugu", "tel"), ("kannada", "kan"), ("malayalam", "mal"),
-        ]:
-            search = search.replace(lang, code)
 
         if not search.strip():
             k = await message.reply_text(

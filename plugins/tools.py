@@ -4,12 +4,13 @@ from html import escape
 from pyrogram import Client, enums, filters
 from pyrogram.errors import FloodWait, MessageNotModified, MessageTooLong, PeerIdInvalid, UserIsBlocked
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
-from database.ia_filterdb import Media, get_bad_files, get_file_details, get_search_results, unpack_new_file_id
-from database.users_chats_db import db
+from plugins.index import Media, get_bad_files, get_file_details, get_search_results, unpack_new_file_id
+from utils import db
 from info import *
 from utils import broadcast_messages, connected_group, get_settings, get_shortlink, get_size, is_group_connected, is_subscribed, save_group_settings, search_gagala, temp
 
 BROADCAST_CANCEL = set()
+OWNER_ID = ADMINS[0]  # same rule bot.py uses: the first ADMINS entry is the bot owner
 
 def get_settings_keyboard(settings: dict):
     spell = bool(settings.get("spell_check", SPELL_CHECK_REPLY))
@@ -355,6 +356,25 @@ async def update_shortlink2(bot, message):
     await asyncio.sleep(10)
     await reply.delete()
 
+SHORTENER_KEYS = ("shortlink", "shortlink_api", "second_shortlink", "second_shortlink_api")
+SHORTENERS_VISIBLE_SECONDS = 30  # long enough to read the keys and press the button, short enough not to leave keys in the group
+
+
+def shorteners_text(settings: dict) -> str:
+    return (
+        "🎛 Shortener Settings:-\n"
+        "━━━━━━━━━━━\n"
+        f"🗃 Primary: `{settings.get('shortlink') or SHORT1_URL}`\n"
+        f"🔐 API: `{settings.get('shortlink_api') or SHORT1_API}`\n"
+        f"🗃 Backup: `{settings.get('second_shortlink') or SHORT2_URL}`\n"
+        f"🔐 API: `{settings.get('second_shortlink_api') or SHORT2_API}`"
+    )
+
+
+def shorteners_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("♻️ Switch Shorteners", callback_data="swap_shorteners")]])
+
+
 @Client.on_message(filters.command("shorteners") & filters.user(ADMINS))
 async def view_shorteners(bot, message):
     if message.chat.type == enums.ChatType.PRIVATE:
@@ -362,27 +382,62 @@ async def view_shorteners(bot, message):
     if not await is_group_connected(message.chat.id):
         return await message.reply_text("Connect this group first with /connect.")
     settings = await get_settings(message.chat.id)
-    s1_url = settings.get('shortlink') or SHORT1_URL
-    s1_api = settings.get('shortlink_api') or SHORT1_API
-    s2_url = settings.get('second_shortlink') or SHORT2_URL
-    s2_api = settings.get('second_shortlink_api') or SHORT2_API
-    is_active = settings.get('is_shortlink', IS_SHORTLINK)
-    
-    # Send the response and save it in a variable
+
     sent_message = await message.reply_text(
-        f"⚙️ **Current Group Shortener Configuration**\n\n"
-        f"• **Status:** `{'Enabled' if is_active else 'Disabled'}`\n"
-        f"• **Primary (Short1):** `{s1_url}` (API: `{s1_api}`)\n"
-        f"• **Secondary (Short2):** `{s2_url}` (API: `{s2_api}`)",
+        shorteners_text(settings),
+        reply_markup=shorteners_keyboard(),
         parse_mode=enums.ParseMode.MARKDOWN,
     )
-    
-    # Wait 10 seconds and delete ONLY the bot's message
-    await asyncio.sleep(10)
+
+    # Delete ONLY the bot's message once the time is up
+    await asyncio.sleep(SHORTENERS_VISIBLE_SECONDS)
     try:
         await sent_message.delete()
     except Exception:
         pass
+
+
+@Client.on_callback_query(filters.regex(r"^swap_shorteners$"))
+async def swap_shorteners(client, callback):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer("Only the bot owner can switch shorteners.", show_alert=True)
+
+    chat = callback.message.chat
+    if chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP) and not await is_group_connected(chat.id):
+        return await callback.answer("This group is disconnected.", show_alert=True)
+
+    settings = await get_settings(chat.id)
+    old = (
+        settings.get("shortlink") or SHORT1_URL,
+        settings.get("shortlink_api") or SHORT1_API,
+        settings.get("second_shortlink") or SHORT2_URL,
+        settings.get("second_shortlink_api") or SHORT2_API,
+    )
+    new = (old[2], old[3], old[0], old[1])  # primary <-> backup, site and API together
+
+    try:
+        for key, value in zip(SHORTENER_KEYS, new):
+            await save_group_settings(chat.id, key, value)
+    except Exception:
+        logging.getLogger(__name__).exception("Switching shorteners failed in chat %s", chat.id)
+        for key, value in zip(SHORTENER_KEYS, old):  # never leave a site paired with the other site's API
+            try:
+                await save_group_settings(chat.id, key, value)
+            except Exception:
+                pass
+        return await callback.answer("Could not switch the shorteners. Please try again.", show_alert=True)
+
+    settings = await get_settings(chat.id)
+    try:
+        await callback.message.edit_text(
+            shorteners_text(settings),
+            reply_markup=shorteners_keyboard(),
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+    except MessageNotModified:
+        pass
+    await callback.answer("♻️ Primary and backup switched")
+
 
 @Client.on_message(filters.command('logs') & filters.user(ADMINS))
 async def log_file(bot, message):
