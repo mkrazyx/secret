@@ -1,31 +1,25 @@
-import logging
-from pyrogram.errors import InputUserDeactivated, UserNotParticipant, FloodWait, UserIsBlocked, PeerIdInvalid
-from info import *
 import asyncio
-from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
-from pyrogram.errors import FloodWait, UserIsBlocked, MessageNotModified, PeerIdInvalid
-from pyrogram import enums, filters
-from typing import Union
-import re
+import logging
 import os
-from datetime import datetime, timedelta
-from typing import List
-import motor.motor_asyncio
-from bs4 import BeautifulSoup
-import requests
-import aiohttp
-from rapidfuzz import fuzz
+import re
 import urllib.parse
-from shortzy import Shortzy
+from datetime import datetime, timedelta
+from typing import List, Union
+
+import aiohttp
+import motor.motor_asyncio
 import regex
-import http.client
-import json
+from bs4 import BeautifulSoup
+from pyrogram import enums, filters
+from pyrogram.errors import FloodWait, InputUserDeactivated, PeerIdInvalid, UserIsBlocked, UserNotParticipant
+from pyrogram.types import Message
+from rapidfuzz import fuzz
+from shortzy import Shortzy
+
+from info import *
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-
-# ==================== USERS / CHATS DB ====================
 
 class Database:
     def __init__(self, uri, database_name):
@@ -157,6 +151,12 @@ class Database:
     async def delete_cache(self, key):
         await self.cache.delete_one({"_id": key})
 
+    async def pop_cache(self, key):
+        item = await self.cache.find_one_and_delete({"_id": key})
+        if not item or (item.get("expires_at") and item["expires_at"] <= datetime.utcnow()):
+            return None
+        return item.get("data")
+
     async def set_restart_flag(self):
         await self.set_cache("__manual_restart__", {"restart": True}, ttl=600)
 
@@ -170,9 +170,7 @@ class Database:
     async def get_db_size(self):
         return (await self.db.command("dbstats"))["dataSize"]
 
-
 db = Database(DATABASE_URI, DATABASE_NAME)
-
 
 BTN_URL_REGEX = re.compile(
     r"(\[([^\[]+?)\]\((buttonurl|buttonalert):(?:/{0,2})(.+?)(:same)?\))"
@@ -243,8 +241,6 @@ async def broadcast_messages(user_id, message):
     except Exception as e:
         return False, "Error"
 
-
-    
 async def search_gagala(text):
 
     query = urllib.parse.quote_plus(text)
@@ -312,7 +308,6 @@ def _as_bool(value, default):
             return False
     return default
 
-
 async def get_settings(group_id):
     group_id = int(group_id)
     settings = temp.SETTINGS.get(group_id)
@@ -330,7 +325,6 @@ async def get_settings(group_id):
     }
     temp.SETTINGS[group_id] = settings
     return settings
-
 
 async def save_group_settings(group_id, key, value):
     allowed = {
@@ -367,8 +361,6 @@ async def save_group_settings(group_id, key, value):
         settings[key] = value
         return
 
-    # Shortener configuration is per-group. If it matches the global default,
-    # remove the override so future info.py changes automatically apply.
     defaults = {
         "shortlink": SHORT1_URL,
         "shortlink_api": SHORT1_API,
@@ -391,7 +383,6 @@ async def is_group_connected(chat_id):
     temp.GROUP_ACCESS[chat_id] = connected
     return connected
 
-
 async def set_group_connected(chat_id, connected):
     chat_id = int(chat_id)
     if connected:
@@ -399,7 +390,6 @@ async def set_group_connected(chat_id, connected):
     else:
         await db.disconnect_group(chat_id)
     temp.GROUP_ACCESS[chat_id] = connected
-
 
 async def connected_group_filter(_, __, update):
     chat = getattr(update, "chat", None)
@@ -411,12 +401,9 @@ async def connected_group_filter(_, __, update):
         return True
     return await is_group_connected(chat.id)
 
-
 connected_group = filters.create(connected_group_filter)
 
-
 def get_size(size):
-    """Get size in readable format"""
 
     units = ["Bytes", "KB", "MB", "GB", "TB", "PB", "EB"]
     size = float(size)
@@ -430,35 +417,27 @@ def split_list(l, n):
     for i in range(0, len(l), n):
         yield l[i:i + n]
 
-
-# ==================== RESULT NAME FORMATTING ====================
-
-# A word starts at a letter that is not glued to a digit/letter before it, so "1080p" and "2160p" are never touched.
 _WORD_RE = re.compile(r"(?<![\w'])[^\W\d_][\w']*")
 _EPISODE_RE = re.compile(r"s\d{1,2}(?:e\d{1,3})?", re.I)
-# A standalone year 1900-2099. Not wrapped when it is already in ( ) or [ ], when a letter/digit touches it
-# (1080p, 2160p, 1920x1080, x1999) or when it is part of a range like 2024-25.
 _YEAR_RE = re.compile(r"(?<![\w(\[])(?<!\d-)((?:19|20)\d{2})(?![\w)\]]|-\d)")
 _WRAPPED_YEAR_RE = re.compile(r"[(\[](?:19|20)\d{2}[)\]]")
 
-
 def pretty_name(name):
-    """'avatar the way of water 2022 1080p hindi s01e02' -> 'Avatar The Way Of Water (2022) 1080p Hindi S01E02'"""
 
     def capitalise(m):
         word = m.group(0)
         if _EPISODE_RE.fullmatch(word):
             return word.upper()
         if any(ch.isdigit() for ch in word):
-            return word                      # x264, 10bit, ddp5 ... stay as written
-        return word[0].upper() + word[1:]    # only the first letter changes, WEBRip stays WEBRip
+            return word
+        return word[0].upper() + word[1:]
 
     text = _WORD_RE.sub(capitalise, name or "")
 
-    hits = [] if _WRAPPED_YEAR_RE.search(text) else list(_YEAR_RE.finditer(text))   # a wrapped year means it is done
+    hits = [] if _WRAPPED_YEAR_RE.search(text) else list(_YEAR_RE.finditer(text))
     if hits:
         last = hits[-1]
-        lone_title = len(hits) == 1 and not text[:last.start()].strip()   # "2012 1080p": the year is the title
+        lone_title = len(hits) == 1 and not text[:last.start()].strip()
         if not lone_title:
             text = f"{text[:last.start()]}({last.group(1)}){text[last.end():]}"
     return text
@@ -481,7 +460,6 @@ def get_file_id(msg: Message):
                 return obj
 
 def extract_user(message: Message) -> Union[int, str]:
-    """extracts the user from a message"""
     user_id = None
     user_first_name = None
     if message.reply_to_message:
@@ -493,7 +471,7 @@ def extract_user(message: Message) -> Union[int, str]:
             len(message.entities) > 1 and
             message.entities[1].type == enums.MessageEntityType.TEXT_MENTION
         ):
-           
+
             required_entity = message.entities[1]
             user_id = required_entity.user.id
             user_first_name = required_entity.user.first_name
@@ -530,7 +508,7 @@ def last_online(from_user):
 def split_quotes(text: str) -> List:
     if not any(text.startswith(char) for char in START_CHAR):
         return text.split(None, 1)
-    counter = 1  # ignore first char -> is some kind of quote
+    counter = 1
     while counter < len(text):
         if text[counter] == "\\":
             counter += 1
@@ -541,7 +519,7 @@ def split_quotes(text: str) -> List:
         return text.split(None, 1)
 
     key = remove_escapes(text[1:counter].strip())
-    
+
     rest = text[counter + 1:].strip()
     if not key:
         key = text[0] + text[0]
@@ -619,15 +597,12 @@ async def get_shortlink(chat_id, link, client=None):
         await notify_admin(str(second_error), secondary_site)
         raise RuntimeError("All shorteners are down.") from second_error
 
-
 async def extract_v2(text):
     text = text.lower()
 
-    # remove emojis & symbols early
     text = regex.sub(r'\p{So}', '', text)
     text = re.sub(r"[@!$_\-.+:*#⁓(),/?]", " ", text)
 
-    # normalize season / episode words
     text = re.sub(
         r'\bseason\s*(\d{1,2})\b',
         lambda m: f's{m.group(1).zfill(2)}',
@@ -639,7 +614,6 @@ async def extract_v2(text):
         text
     )
 
-    # normalize short forms
     text = re.sub(r'\bs(\d)\b', r's0\1', text)
     text = re.sub(r'\be(\d)\b', r'e0\1', text)
     text = re.sub(
@@ -648,30 +622,24 @@ async def extract_v2(text):
         text
     )
 
-    # 🔥 normalize ALL season + episode combinations
-
-    # season 5 episode 1 / season 5 ep1
     text = re.sub(
         r'season\s*(\d{1,2})\s*(?:episode|ep)\s*(\d{1,2})',
         lambda m: f"s{m.group(1).zfill(2)}e{m.group(2).zfill(2)}",
         text
     )
 
-    # s5 episode 1 / s5 ep1 / s05 ep01
     text = re.sub(
         r's(\d{1,2})\s*(?:episode|ep)\s*(\d{1,2})',
         lambda m: f"s{m.group(1).zfill(2)}e{m.group(2).zfill(2)}",
         text
     )
 
-    # s5 e1 / s05 e01 / s5e1
     text = re.sub(
         r's(\d{1,2})\s*e(\d{1,2})',
         lambda m: f"s{m.group(1).zfill(2)}e{m.group(2).zfill(2)}",
         text
     )
 
-    # cleanup spaces
     text = re.sub(r'\s+', ' ', text).strip()
 
     return text

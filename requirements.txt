@@ -9,7 +9,6 @@ rapidfuzz
 bs4
 shortzy
 datetime
-pytz
 regex
 Flask==2.2.2
 Werkzeug==2.2.2
