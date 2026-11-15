@@ -1,16 +1,13 @@
 from pyrogram import Client, enums, filters
 
-from utils import db
-from info import ADMINS
-from utils import connected_group, temp
-
+from info import *
+from utils import connected_group, db, temp
 
 def is_bot_admin_status(status):
     return status in (
         enums.ChatMemberStatus.ADMINISTRATOR,
         enums.ChatMemberStatus.OWNER,
     )
-
 
 @Client.on_message(
     filters.group
@@ -28,7 +25,6 @@ async def connect_group(client, message):
     await message.reply(
         f"Connected: <b>{message.chat.title}</b>\nThe bot is now active in this group."
     )
-
 
 @Client.on_message(
     filters.group

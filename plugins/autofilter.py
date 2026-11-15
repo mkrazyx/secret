@@ -4,17 +4,17 @@ import math
 import re
 import time as _time
 from html import escape
+
 from pyrogram import Client, enums, filters
 from pyrogram.errors import MessageNotModified
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from plugins.index import Media, get_bad_files, get_file_details, get_search_results
-from utils import db
+
 from info import *
-from utils import get_settings, get_shortlink, get_size, is_group_connected, is_subscribed, pretty_name, search_gagala, temp
+from plugins.index import get_file_details, get_search_results
+from utils import db, get_settings, get_shortlink, get_size, is_group_connected, is_subscribed, pretty_name, search_gagala, temp
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)
-lock = asyncio.Lock()
 SPELL_CHECK = {}
 GLOBAL_SEM = asyncio.Semaphore(12)
 USER_COOLDOWN = {}
@@ -261,7 +261,7 @@ async def advantage_spoll_choker(bot, query):
             except Exception:
                 pass
 
-@Client.on_callback_query(filters.regex(r"^(close_data|pages|killfilesdq#)"))
+@Client.on_callback_query(filters.regex(r"^(close_data|pages)"))
 async def cb_handler(client, query):
     if query.data == "close_data":
         try:
@@ -271,36 +271,6 @@ async def cb_handler(client, query):
         return await query.answer("Closed!")
     if query.data == "pages":
         return await query.answer()
-    if query.data.startswith("killfilesdq"):
-        user_id = query.from_user.id
-        if query.message.chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
-            member = await client.get_chat_member(query.message.chat.id, user_id)
-            if member.status not in (
-                enums.ChatMemberStatus.ADMINISTRATOR,
-                enums.ChatMemberStatus.OWNER,
-            ) and user_id not in ADMINS:
-                return await query.answer(ALRT_TXT, show_alert=True)
-
-        try:
-            _, keyword = query.data.split("#", 1)
-        except ValueError:
-            return await query.answer(ALRT_TXT, show_alert=True)
-
-        files, _ = await get_bad_files(keyword)
-        await query.message.edit_text("<b>File deletion process will start in 5 seconds!</b>")
-        await asyncio.sleep(5)
-
-        deleted = 0
-        async with lock:
-            for file in files:
-                result = await Media.collection.delete_one({"_id": file.file_id})
-                if result.deleted_count:
-                    deleted += 1
-
-        await query.message.edit_text(
-            f"<b>Process completed! Successfully deleted {deleted} files for: {escape(keyword)}</b>"
-        )
-        return await query.answer("Deletion completed.", show_alert=True)
 
 async def auto_filter(client, msg, spoll=False):
     if not spoll:
@@ -483,7 +453,6 @@ async def delete_later(message, seconds=600):
 @Client.on_message(filters.command("start") & filters.incoming)
 async def start(client, message):
 
-    # Group / supergroup
     if message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
         if not await is_group_connected(message.chat.id):
             return
@@ -502,7 +471,6 @@ async def start(client, message):
             disable_web_page_preview=True,
         )
 
-    # Private
     if not message.from_user:
         return
 
@@ -518,18 +486,17 @@ async def start(client, message):
             message.from_user.id,
             message.from_user.first_name
         )
+        user = message.from_user
+        profile = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"
         try:
             await client.send_message(
                 LOG_CHANNEL,
-                LOG_TEXT_P.format(
-                    message.from_user.id,
-                    message.from_user.mention
-                )
+                f'#NewUser\nID - <code>{user.id}</code>\nNᴀᴍᴇ - <a href="{profile}">{escape(user.first_name or "User")}</a>',
+                parse_mode=enums.ParseMode.HTML,
             )
         except Exception:
             pass
 
-    # Common start buttons
     start_buttons = [
         [
             InlineKeyboardButton(
@@ -553,7 +520,6 @@ async def start(client, message):
         ]
     ]
 
-    # Plain /start
     if len(message.command) != 2:
         return await message.reply_photo(
             photo=PICS,
@@ -566,9 +532,6 @@ async def start(client, message):
             parse_mode=enums.ParseMode.HTML,
         )
 
-    # Force subscription
-    # Preserve the exact start payload so file links and shortlink
-    # destination links survive the "Try Again" flow unchanged.
     data = message.command[1]
 
     if AUTH_CHANNEL and not await is_subscribed(client, message):
@@ -584,7 +547,6 @@ async def start(client, message):
             parse_mode=enums.ParseMode.MARKDOWN,
         )
 
-    # Non-file start payloads
     if data in {"subscribe", "error", "okay", "help"}:
         return await message.reply_photo(
             photo=PICS,
@@ -597,7 +559,6 @@ async def start(client, message):
             parse_mode=enums.ParseMode.HTML,
         )
 
-    # File / shortlink payload
     if data.startswith(("files_", "short_")):
         parts = data.split("_", 2)
         if len(parts) == 3:
@@ -629,7 +590,6 @@ async def start(client, message):
                 "<b>Link Expired, Search Again in Group!</b>"
             )
 
-        # The shortener destination must deliver the file directly.
         if pre == "short":
             if not await send_file_to_user(client, message.from_user.id, file_id):
                 await message.reply("No such file exist.")

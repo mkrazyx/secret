@@ -1,28 +1,25 @@
 import asyncio
+import base64
 import logging
 import re
-import base64
+from html import escape
 from struct import pack
 
-from pyrogram import Client, filters, enums
-from pyrogram.errors import FloodWait, PeerIdInvalid
-from pyrogram.errors.exceptions.bad_request_400 import ChannelInvalid, ChatAdminRequired, UsernameInvalid, UsernameNotModified
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.file_id import FileId
-from pymongo.errors import DuplicateKeyError
-from umongo import Instance, Document, fields
-from motor.motor_asyncio import AsyncIOMotorClient
 from marshmallow.exceptions import ValidationError
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
+from pyrogram import Client, enums, filters
+from pyrogram.errors import ChannelInvalid, ChannelPrivate, FloodWait, PeerIdInvalid, UsernameInvalid, UsernameNotModified
+from pyrogram.file_id import FileId
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from umongo import Document, Instance, fields
 
-from info import ADMINS, CHANNELS, CAPTION_INDEX_CHANNEL, DATABASE_URI, DATABASE_NAME, COLLECTION_NAME
-from utils import temp, connected_group, extract_v2
-
-# ==================== IA_FILTERDB (files database) ====================
+from info import *
+from utils import connected_group, extract_v2, temp
 
 client = AsyncIOMotorClient(DATABASE_URI)
 mongo_db = client[DATABASE_NAME]
 instance = Instance.from_db(mongo_db)
-
 
 def normalize(text: str) -> list:
     text = text.casefold()
@@ -32,7 +29,6 @@ def normalize(text: str) -> list:
     text = re.sub(r"\s+", " ", text).strip()
     return text.split()
 
-
 def normalize_basic_episode(text: str) -> str:
     text = text.casefold()
     text = re.sub(r'\bs(\d{2})\s*e(\d{2})\b', r's\1e\2', text)
@@ -40,20 +36,14 @@ def normalize_basic_episode(text: str) -> str:
     text = re.sub(r'\bs(\d{2})\s*ep\s*(\d{2})\b', r's\1e\2', text)
     return text
 
-
-# Short language codes found in file names -> full name stored in MongoDB.
 LANG_CODES = {
     "eng": "english", "hin": "hindi", "tam": "tamil", "tel": "telugu",
     "kan": "kannada", "mal": "malayalam", "kor": "korean",
 }
 
-
 async def normalize_for_search(text: str) -> str:
-    # Saving/indexing uses basic episode normalization + normalize() + language names.
-    # extract_v2() is reserved for user search queries.
     text = normalize_basic_episode(str(text or ""))
     return " ".join(LANG_CODES.get(word, word) for word in normalize(text))
-
 
 @instance.register
 class Media(Document):
@@ -113,7 +103,6 @@ async def save_file(media):
     logger.info("%s indexed", original_name)
     return True, 1
 
-
 async def get_search_results(
     chat_id,
     query,
@@ -140,7 +129,6 @@ async def get_search_results(
     if file_type:
         base_filter["file_type"] = file_type
 
-    # Strict: every search term must exist as a complete filename word.
     strict_conditions = [
         {
             "file_name": {
@@ -152,8 +140,6 @@ async def get_search_results(
     ]
     strict_filter = {**base_filter, "$and": strict_conditions}
 
-    # Fuzzy: every search term may occur anywhere inside the filename.
-    # Strict matches are excluded here so a file is never shown twice.
     fuzzy_conditions = [
         {
             "file_name": {
@@ -169,8 +155,6 @@ async def get_search_results(
         "$nor": [{"$and": strict_conditions}],
     }
 
-    # Get the sizes of both sections concurrently. We need the exact total
-    # because the existing UI displays Pages X/Y and uses next_offset.
     strict_count_task = Media.count_documents(strict_filter)
     fuzzy_count_task = Media.count_documents(fuzzy_filter)
     strict_total, fuzzy_total = await asyncio.gather(
@@ -183,9 +167,6 @@ async def get_search_results(
     if total_results == 0 or offset >= total_results:
         return [], "", total_results
 
-    # The result list is logically:
-    #   [all strict matches] + [all fuzzy-only matches]
-    # Fetch only the 10 records needed for this page.
     if offset < strict_total:
         strict_cursor = (
             Media.find(strict_filter)
@@ -195,8 +176,6 @@ async def get_search_results(
         )
         files = await strict_cursor.to_list(length=max_results)
 
-        # If the page crosses the strict/fuzzy boundary, fill the remaining
-        # slots from the beginning of the fuzzy-only section.
         if len(files) < max_results and offset + len(files) < total_results:
             remaining = max_results - len(files)
             fuzzy_cursor = (
@@ -223,24 +202,25 @@ async def get_search_results(
 
     return files, next_offset, total_results
 
-
-async def get_bad_files(query, file_type=None, **kwargs):
+def bad_files_filter(query):
     words = normalize(query)
-    mongo_filter = (
-        {"$and": [{"file_name": {"$regex": re.escape(word), "$options": "i"}} for word in words]}
-        if words else {}
-    )
-    if file_type:
-        mongo_filter["file_type"] = file_type
+    if not words:
+        return None
+    return {"$and": [{"file_name": {"$regex": re.escape(word), "$options": "i"}} for word in words]}
 
-    cursor = Media.find(mongo_filter).sort("$natural", -1)
-    files = await cursor.to_list(length=100)
-    return files, len(files)
+async def count_bad_files(query):
+    mongo_filter = bad_files_filter(query)
+    return await Media.count_documents(mongo_filter) if mongo_filter else 0
 
+async def delete_bad_files(query):
+    mongo_filter = bad_files_filter(query)
+    if not mongo_filter:
+        return 0
+    result = await Media.collection.delete_many(mongo_filter)
+    return result.deleted_count
 
 async def get_file_details(file_id):
     return await Media.find({"_id": file_id}).to_list(length=1)
-
 
 def encode_file_id(s: bytes) -> str:
     r = b""
@@ -255,10 +235,8 @@ def encode_file_id(s: bytes) -> str:
             r += bytes([i])
     return base64.urlsafe_b64encode(r).decode().rstrip("=")
 
-
 def encode_file_ref(file_ref: bytes) -> str:
     return base64.urlsafe_b64encode(file_ref).decode().rstrip("=")
-
 
 def unpack_new_file_id(new_file_id):
     decoded = FileId.decode(new_file_id)
@@ -274,15 +252,12 @@ def unpack_new_file_id(new_file_id):
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
 
-# ==================== CHANNEL.PY ====================
-
 media_filter = filters.document | filters.video
 
 index_channels = list(dict.fromkeys([*CHANNELS, CAPTION_INDEX_CHANNEL]))
 
 @Client.on_message(filters.chat(index_channels) & media_filter)
 async def media(bot, message):
-    """Index media from configured channels."""
     for file_type in ("document", "video"):
         media = getattr(message, file_type, None)
         if media is not None:
@@ -295,8 +270,6 @@ async def media(bot, message):
     media.chat_id = message.chat.id
     await save_file(media)
 
-# ==================== INDEX.PY ====================
-
 logger = logging.getLogger(__name__)
 
 logger.setLevel(logging.INFO)
@@ -308,24 +281,59 @@ index_state_col = mongo_db["index_state"]
 async def get_index_state():
     return await index_state_col.find_one({"_id": "active_index"})
 
-async def save_index_state(chat_id, lst_msg_id, current, total_files, duplicate, deleted):
-    await index_state_col.update_one(
-        {"_id": "active_index"},
-        {
-            "$set": {
-                "chat_id": chat_id,
-                "lst_msg_id": lst_msg_id,
-                "current": current,
-                "total_files": total_files,
-                "duplicate": duplicate,
-                "deleted": deleted
-            }
-        },
-        upsert=True
-    )
+async def save_index_state(chat_id, lst_msg_id, current, total_files, duplicate, deleted, access_hash=None):
+    state = {
+        "chat_id": chat_id,
+        "lst_msg_id": lst_msg_id,
+        "current": current,
+        "total_files": total_files,
+        "duplicate": duplicate,
+        "deleted": deleted,
+    }
+    if access_hash:
+        state["access_hash"] = access_hash
+    await index_state_col.update_one({"_id": "active_index"}, {"$set": state}, upsert=True)
 
 async def clear_index_state():
     await index_state_col.delete_one({"_id": "active_index"})
+
+async def get_access_hash(bot, chat):
+    try:
+        return getattr(await bot.resolve_peer(chat), "access_hash", None)
+    except Exception:
+        return None
+
+async def restore_peer(bot, chat, access_hash):
+    if not access_hash or not str(chat).startswith("-100"):
+        return
+    try:
+        await bot.storage.update_peers([(int(chat), access_hash, "channel", None, None)])
+    except Exception:
+        logger.exception("Could not restore the saved peer for %s", chat)
+
+async def open_index_chat(bot, chat, access_hash=None, attempts=1):
+    await restore_peer(bot, chat, access_hash)
+    for attempt in range(1, attempts + 1):
+        try:
+            return await bot.get_chat(chat)
+        except FloodWait as e:
+            error = e
+            await asyncio.sleep(e.value + 1)
+        except (PeerIdInvalid, ChannelInvalid, ChannelPrivate) as e:
+            error = e
+            if attempt < attempts:
+                await asyncio.sleep(3 * attempt)
+    raise error
+
+async def notify_owner(bot, text, reply_markup=None):
+    for _ in range(2):
+        try:
+            return await bot.send_message(OWNER_ID, text, reply_markup=reply_markup)
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 1)
+        except Exception:
+            logger.exception("Could not message the owner")
+            return
 
 @Client.on_callback_query(filters.regex(r'^index'))
 async def index_files(bot, query):
@@ -335,7 +343,7 @@ async def index_files(bot, query):
         temp.CANCEL = True
         await clear_index_state()
         return await query.answer("Cancelling Indexing")
-    
+
     if query.data == 'index_status':
         current_progress = getattr(temp, 'CURRENT', 0)
         total_saved = getattr(temp, 'SAVED', 0)
@@ -438,19 +446,30 @@ async def send_for_index(bot, message):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
+SKIP_LINK_RE = re.compile(
+    r"^(?:https?://)?(?:t\.me|telegram\.me|telegram\.dog)/(?:c/\d+|(?!c/)[a-z_]\w*)(?:/\d+)?/(\d+)/?(?:\?\S*)?$", re.I
+)
+
+def parse_skip(value):
+    value = value.strip()
+    if value.isdigit():
+        return int(value)
+    match = SKIP_LINK_RE.match(value)
+    return int(match.group(1)) if match else None
+
 @Client.on_message(filters.command('setskip') & filters.user(ADMINS) & connected_group)
 async def set_skip_number(bot, message):
-    if ' ' in message.text:
-        _, skip = message.text.split(" ")
-        try:
-            skip = int(skip)
-        except:
-            return await message.reply("Skip number should be an integer.")
-        await message.reply(f"📲 SKIP Number set: {skip}")
-        temp.CURRENT = int(skip)
-    else:
-        await message.reply("Give me a skip number.")
-
+    if len(message.command) < 2:
+        return await message.reply(
+            "Give me a skip number or a message link.\n\n"
+            "<code>/setskip 624766</code>\n"
+            "<code>/setskip https://t.me/c/1725696043/624766</code>"
+        )
+    skip = parse_skip(message.command[1])
+    if skip is None:
+        return await message.reply("Skip should be a message number or a message link like https://t.me/c/1725696043/624766")
+    temp.CURRENT = skip
+    await message.reply(f"📲 SKIP Number set: {skip}")
 
 async def iter_index_messages(bot, chat_id, limit, offset=0):
     current = offset
@@ -465,7 +484,7 @@ async def iter_index_messages(bot, chat_id, limit, offset=0):
             yield message
             current += 1
 
-async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, resume_saved=0, resume_dup=0, resume_del=0):
+async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, resume_saved=0, resume_dup=0, resume_del=0, access_hash=None):
     total_files = resume_saved
     duplicate = resume_dup
     deleted = resume_del
@@ -473,18 +492,19 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, res
     temp.SAVED = total_files
     temp.DUP = duplicate
     temp.DEL = deleted
-    
-    # Ensure it respects what was set via /setskip if no explicit resume value is passed
+
     if resume_current is not None:
         temp.CURRENT = resume_current
     elif not hasattr(temp, 'CURRENT'):
         temp.CURRENT = 0
 
+    cancelled = False
+    chat_info = None
     async with lock:
         try:
             try:
-                await bot.get_chat(chat)
-            except (PeerIdInvalid, ChannelInvalid, UsernameInvalid, UsernameNotModified) as e:
+                chat_info = await open_index_chat(bot, chat, access_hash)
+            except (PeerIdInvalid, ChannelInvalid, ChannelPrivate, UsernameInvalid, UsernameNotModified) as e:
                 await clear_index_state()
                 logger.error("Unable to resolve indexing chat %s: %s", chat, e)
                 try:
@@ -492,6 +512,7 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, res
                 except Exception:
                     pass
                 return
+            access_hash = access_hash or await get_access_hash(bot, chat)
 
             current = temp.CURRENT
             last_edit = current
@@ -507,17 +528,18 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, res
                     except FloodWait as e:
                         logger.warning(f"FloodWait while cancelling: {e.value} seconds.")
                     await clear_index_state()
+                    cancelled = True
                     break
 
                 current += 1
                 temp.CURRENT = current
 
                 if current % 50 == 0:
-                    await save_index_state(chat, lst_msg_id, current, total_files, duplicate, deleted)
+                    await save_index_state(chat, lst_msg_id, current, total_files, duplicate, deleted, access_hash)
 
                 if (current >= 10 and last_edit == temp.CURRENT) or (current - last_edit >= 2000):
                     last_edit = current
-                    await save_index_state(chat, lst_msg_id, current, total_files, duplicate, deleted)
+                    await save_index_state(chat, lst_msg_id, current, total_files, duplicate, deleted, access_hash)
                     try:
                         await msg.edit_text(
                             text=f"● Messages Fetched: <code>{current}</code>\n"
@@ -562,13 +584,23 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, res
 
         except Exception as e:
             logger.exception(e)
+            error_text = str(e)
             try:
-                await msg.edit(f'Error: {e}')
-            except FloodWait as e:
-                logger.warning(f"FloodWait while sending error: {e.value} seconds.")
+                await msg.edit(f'Error: {error_text}')
+            except FloodWait as flood:
+                logger.warning(f"FloodWait while sending error: {flood.value} seconds.")
+            await notify_owner(
+                bot,
+                f"<b>❌ Indexing Stopped</b>\n━━━━━━━━━━━━━━\n"
+                f"📢 Channel: {escape(str(getattr(chat_info, 'title', None) or chat))}\n"
+                f"📊 Processed: {temp.CURRENT}\n"
+                f"❗ Error: {escape(error_text)}"
+            )
         else:
             temp.CURRENT = 0
             await clear_index_state()
+            if cancelled:
+                return
             try:
                 await msg.edit(
                     f'<b>🔆 Saved "{total_files}" Files!</b>\n\n'
@@ -577,48 +609,63 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, res
                 )
             except FloodWait as e:
                 logger.warning(f"FloodWait while sending final result: {e.value} seconds.")
+            await notify_owner(
+                bot,
+                f"<b>✅ Indexing Completed</b>\n━━━━━━━━━━━━━━\n"
+                f"📢 Channel: {escape(str(getattr(chat_info, 'title', None) or chat))}\n"
+                f"🗃 Saved: {total_files}\n"
+                f"♻️ Duplicates: {duplicate}\n"
+                f"🗑 Deleted Messages: {deleted}"
+            )
 
 async def check_pending_index_on_startup(client):
     state = await get_index_state()
-    if state:
-        chat_id = state.get("chat_id")
-        lst_msg_id = state.get("lst_msg_id")
-        current = state.get("current", 0)
-        saved = state.get("total_files", 0)
-        dup = state.get("duplicate", 0)
-        deleted = state.get("deleted", 0)
-        
-        logger.info(f"Found pending indexing task! Resuming from message count: {current}")
+    if not state:
+        return
+    chat_id = state.get("chat_id")
+    lst_msg_id = state.get("lst_msg_id")
+    current = state.get("current", 0)
+    saved = state.get("total_files", 0)
+    dup = state.get("duplicate", 0)
+    deleted = state.get("deleted", 0)
+    access_hash = state.get("access_hash")
 
+    logger.info(f"Found pending indexing task! Resuming from message count: {current}")
+
+    try:
+        await open_index_chat(client, chat_id, access_hash, attempts=3)
+    except Exception as e:
+        logger.exception("Could not resume the pending index for %s", chat_id)
+        await notify_owner(
+            client,
+            f"<b>⚠️ Could Not Resume Indexing</b>\n━━━━━━━━━━━━━━\n"
+            f"📢 Chat: <code>{chat_id}</code>\n"
+            f"📊 Processed: {current}\n"
+            f"❗ Reason: {escape(str(e))}\n\n"
+            f"Make sure the bot is still in that channel, then run <code>/setskip {current}</code> and send the "
+            f"channel link again to continue from here.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🗑 Discard Pending Index', callback_data='index_cancel')]]),
+        )
+        return
+
+    for admin_id in ADMINS:
         try:
-            await client.get_chat(chat_id)
-        except (PeerIdInvalid, ChannelInvalid, UsernameInvalid, UsernameNotModified) as e:
-            logger.error("Discarding stale pending index for %s: %s", chat_id, e)
-            await clear_index_state()
-            return
-        except Exception:
-            logger.exception("Could not verify pending indexing chat %s; leaving state intact", chat_id)
-            return
-
-        for admin_id in ADMINS:
-            try:
-                msg = await client.send_message(
-                    admin_id, 
-                    f"🔄 **Resuming Interrupted Indexing Task**\n● Processed: {current}\n● Saved: {saved}",
-                    reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton('📊 Check Live Status', callback_data='index_status')],
-                         [InlineKeyboardButton('Cancel', callback_data='index_cancel')]]
-                    )
+            msg = await client.send_message(
+                admin_id,
+                f"🔄 **Resuming Interrupted Indexing Task**\n● Processed: {current}\n● Saved: {saved}",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton('📊 Check Live Status', callback_data='index_status')],
+                     [InlineKeyboardButton('Cancel', callback_data='index_cancel')]]
                 )
-                temp.CANCEL = False
-                asyncio.create_task(index_files_to_db(lst_msg_id, chat_id, msg, client, current, saved, dup, deleted))
-                break
-            except Exception:
-                continue
-
-# ==================== CAPTION_EDIT.PY ====================
-
-logger = logging.getLogger(__name__)
+            )
+        except Exception:
+            logger.exception("Could not send the resume message to %s", admin_id)
+            continue
+        temp.CANCEL = False
+        asyncio.create_task(index_files_to_db(lst_msg_id, chat_id, msg, client, current, saved, dup, deleted, access_hash))
+        break
+    else:
+        logger.error("Pending index for %s was not resumed: no admin could be messaged", chat_id)
 
 @Client.on_edited_message(filters.chat(CAPTION_INDEX_CHANNEL))
 async def caption_edit_handler(client, message):

@@ -1,16 +1,20 @@
-import asyncio, datetime, logging, math, os, re, sys, time
-import time as _time
+import asyncio
+import logging
+import os
+import re
+import secrets
+import sys
 from html import escape
+
 from pyrogram import Client, enums, filters
-from pyrogram.errors import FloodWait, MessageNotModified, MessageTooLong, PeerIdInvalid, UserIsBlocked
-from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
-from plugins.index import Media, get_bad_files, get_file_details, get_search_results, unpack_new_file_id
-from utils import db
+from pyrogram.errors import FloodWait, MessageNotModified, MessageTooLong, PeerIdInvalid
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 from info import *
-from utils import broadcast_messages, connected_group, get_settings, get_shortlink, get_size, is_group_connected, is_subscribed, save_group_settings, search_gagala, temp
+from plugins.index import Media, count_bad_files, delete_bad_files, normalize, unpack_new_file_id
+from utils import broadcast_messages, connected_group, db, get_settings, is_group_connected, save_group_settings
 
 BROADCAST_CANCEL = set()
-OWNER_ID = ADMINS[0]  # same rule bot.py uses: the first ADMINS entry is the bot owner
 
 def get_settings_keyboard(settings: dict):
     spell = bool(settings.get("spell_check", SPELL_CHECK_REPLY))
@@ -100,7 +104,6 @@ async def broadcast_users(bot, message):
             f"✅ Successful: {success}"
         )
 
-
 @Client.on_callback_query(filters.regex(r"^cancel_broadcast#"))
 async def cancel_broadcast(bot, query):
     try:
@@ -121,24 +124,20 @@ async def cancel_broadcast(bot, query):
     BROADCAST_CANCEL.add(("users", admin_id))
 
     await query.answer("🛑 Broadcast cancelling...")
-    
 
+DB_STORAGE_LIMIT = 512 * 1024 * 1024
 
 @Client.on_message(filters.command("stats") & filters.incoming & filters.user(ADMINS) & connected_group)
 async def get_stats(bot, message):
     reply = await message.reply("Fetching stats...")
-    total_users = await db.total_users_count()
-    total_chats = await db.total_chat_count()
     files = await Media.count_documents()
-    size = await db.get_db_size()
+    users = await db.total_users_count()
+    chats = await db.total_chat_count()
+    used = await db.get_db_size()
+    free_percent = max(0, DB_STORAGE_LIMIT - used) * 100 / DB_STORAGE_LIMIT
     await reply.edit(
-        STATUS_TXT.format(
-            files,
-            total_users,
-            total_chats,
-            get_size(size),
-            get_size(max(0, 536870912 - size)),
-        )
+        f"<b>🗃 Fɪʟᴇs: {files:,} | 👤 Usᴇʀs: {users:,}\n"
+        f"🗨 Cʜᴀᴛs: {chats:,} | 💾 Sᴛᴏʀᴀɢᴇ: {free_percent:.0f}% Fʀᴇᴇ</b>"
     )
 
 @Client.on_message(filters.command("ban") & filters.user(ADMINS) & connected_group)
@@ -259,23 +258,64 @@ async def delete(bot, message):
     result = await Media.collection.delete_many({'file_name': media.file_name, 'file_size': media.file_size, 'mime_type': media.mime_type})
     await msg.edit('🛃 Deleted File!' if result.deleted_count else 'File not found in database')
 
+DELETE_REQUEST_TTL = 600
+
+async def edit_text_safely(message, text, **kwargs):
+    for _ in range(2):
+        try:
+            return await message.edit_text(text, **kwargs)
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 1)
+        except MessageNotModified:
+            return
+        except Exception:
+            logging.getLogger(__name__).exception("Could not edit message")
+            return
+
 @Client.on_message(filters.command("deletefiles") & filters.user(ADMINS))
 async def deletemultiplefiles(bot, message):
-    try:
-        keyword = message.text.split(" ", 1)[1]
-    except Exception:
-        return await message.reply_text(f"<b>Hey {message.from_user.mention}, Give me a keyword along with the command to delete files.</b>")
-    k = await bot.send_message(chat_id=message.chat.id, text="<b>♻️ Please Wait!</b>")
-    files, total = await get_bad_files(keyword)
-    await k.delete()
-    await message.reply_text(
-        text=f"<b>{total} Files ➠ {keyword}</b>",
+    parts = message.text.split(None, 1)
+    keyword = parts[1].strip() if len(parts) > 1 else ""
+    if not normalize(keyword):
+        return await message.reply_text(
+            f"<b>Hey {message.from_user.mention}, give me a keyword along with the command.\n"
+            "Example: <code>/deletefiles avatar 2009</code></b>"
+        )
+
+    status = await message.reply_text("<b>♻️ Please Wait!</b>")
+    total = await count_bad_files(keyword)
+    if not total:
+        return await edit_text_safely(status, f"<b>No files found ➠ {escape(keyword)}</b>")
+
+    token = secrets.token_hex(4)
+    await db.set_cache(f"deletefiles:{token}", {"keyword": keyword}, ttl=DELETE_REQUEST_TTL)
+    await edit_text_safely(
+        status,
+        f"<b>{total:,} Files ➠ {escape(keyword)}</b>",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🛃 Delete Files!", callback_data=f"killfilesdq#{keyword}")],
+            [InlineKeyboardButton("🛃 Delete Files!", callback_data=f"killfilesdq#{token}")],
             [InlineKeyboardButton("💢 Cancel 💢", callback_data="close_data")],
         ]),
-        parse_mode=enums.ParseMode.HTML,
     )
+
+@Client.on_callback_query(filters.regex(r"^killfilesdq#"))
+async def deletefiles_confirm(bot, query):
+    if query.from_user.id not in ADMINS:
+        return await query.answer("Only bot admins can delete files.", show_alert=True)
+
+    request = await db.pop_cache(f"deletefiles:{query.data.split('#', 1)[1]}")
+    if not request:
+        return await query.answer("This request has expired or was already used. Run /deletefiles again.", show_alert=True)
+
+    keyword = request["keyword"]
+    await query.answer("Deleting...")
+    await edit_text_safely(query.message, f"<b>♻️ Deleting files ➠ {escape(keyword)}</b>")
+    try:
+        deleted = await delete_bad_files(keyword)
+    except Exception:
+        logging.getLogger(__name__).exception("Deleting files for %r failed", keyword)
+        return await edit_text_safely(query.message, "<b>❌ Deleting failed. Check /logs, then run /deletefiles again.</b>")
+    await edit_text_safely(query.message, f"<b>✅ Deleted {deleted:,} files ➠ {escape(keyword)}</b>")
 
 @Client.on_callback_query(filters.regex(r'^setgs#'))
 async def settings_callback(client, callback):
@@ -332,7 +372,12 @@ async def update_shortlink1(bot, message):
     await save_group_settings(message.chat.id, 'shortlink', shortlink_url)
     await save_group_settings(message.chat.id, 'shortlink_api', api)
     await save_group_settings(message.chat.id, 'is_shortlink', True)
-    await reply.edit_text(f"<b>Successfully updated Primary Shortener (Short1)!\n\nWebsite: <code>{shortlink_url}</code>\nAPI: <code>{api}</code></b>")
+    await reply.edit_text(
+        "<b>🔆 Primary Shortener Updated:-\n"
+        "━━━━━━━━━━━━━━\n"
+        f"🗃 Site: <code>{escape(shortlink_url)}</code>\n"
+        f"🔐 API: <code>{escape(api)}</code></b>"
+    )
     await asyncio.sleep(10)
     await reply.delete()
 
@@ -352,13 +397,17 @@ async def update_shortlink2(bot, message):
     await save_group_settings(message.chat.id, 'second_shortlink', shortlink_url)
     await save_group_settings(message.chat.id, 'second_shortlink_api', api)
     await save_group_settings(message.chat.id, 'is_shortlink', True)
-    await reply.edit_text(f"<b>Successfully updated Secondary Shortener (Short2)!\n\nWebsite: <code>{shortlink_url}</code>\nAPI: <code>{api}</code></b>")
+    await reply.edit_text(
+        "<b>🔆 Backup Shortener Updated\n"
+        "━━━━━━━━━━━━━━\n"
+        f"🗃 Site: <code>{escape(shortlink_url)}</code>\n"
+        f"🔐 API: <code>{escape(api)}</code></b>"
+    )
     await asyncio.sleep(10)
     await reply.delete()
 
 SHORTENER_KEYS = ("shortlink", "shortlink_api", "second_shortlink", "second_shortlink_api")
-SHORTENERS_VISIBLE_SECONDS = 30  # long enough to read the keys and press the button, short enough not to leave keys in the group
-
+SHORTENERS_VISIBLE_SECONDS = 30
 
 def shorteners_text(settings: dict) -> str:
     return (
@@ -370,10 +419,8 @@ def shorteners_text(settings: dict) -> str:
         f"🔐 API: `{settings.get('second_shortlink_api') or SHORT2_API}`"
     )
 
-
 def shorteners_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("♻️ Switch Shorteners", callback_data="swap_shorteners")]])
-
 
 @Client.on_message(filters.command("shorteners") & filters.user(ADMINS))
 async def view_shorteners(bot, message):
@@ -389,13 +436,11 @@ async def view_shorteners(bot, message):
         parse_mode=enums.ParseMode.MARKDOWN,
     )
 
-    # Delete ONLY the bot's message once the time is up
     await asyncio.sleep(SHORTENERS_VISIBLE_SECONDS)
     try:
         await sent_message.delete()
     except Exception:
         pass
-
 
 @Client.on_callback_query(filters.regex(r"^swap_shorteners$"))
 async def swap_shorteners(client, callback):
@@ -413,14 +458,14 @@ async def swap_shorteners(client, callback):
         settings.get("second_shortlink") or SHORT2_URL,
         settings.get("second_shortlink_api") or SHORT2_API,
     )
-    new = (old[2], old[3], old[0], old[1])  # primary <-> backup, site and API together
+    new = (old[2], old[3], old[0], old[1])
 
     try:
         for key, value in zip(SHORTENER_KEYS, new):
             await save_group_settings(chat.id, key, value)
     except Exception:
         logging.getLogger(__name__).exception("Switching shorteners failed in chat %s", chat.id)
-        for key, value in zip(SHORTENER_KEYS, old):  # never leave a site paired with the other site's API
+        for key, value in zip(SHORTENER_KEYS, old):
             try:
                 await save_group_settings(chat.id, key, value)
             except Exception:
@@ -437,7 +482,6 @@ async def swap_shorteners(client, callback):
     except MessageNotModified:
         pass
     await callback.answer("♻️ Primary and backup switched")
-
 
 @Client.on_message(filters.command('logs') & filters.user(ADMINS))
 async def log_file(bot, message):
