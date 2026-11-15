@@ -4,6 +4,7 @@ import os
 import re
 import urllib.parse
 from datetime import datetime, timedelta
+from html import escape
 from typing import List, Union
 
 import aiohttp
@@ -412,6 +413,12 @@ def get_size(size):
         i += 1
         size /= 1024.0
     return "%.2f %s" % (size, units[i])
+
+def user_link(user_id, name):
+    return f'<a href="tg://user?id={user_id}">{escape(str(name or "User"))}</a>'
+
+def field(label, value):
+    return f"<b>{label}:</b> <code>{escape(str(value))}</code>"
 
 def split_list(l, n):
     for i in range(0, len(l), n):

@@ -7,7 +7,6 @@ from pyrogram import Client, __version__
 from pyrogram.raw.all import layer
 
 from info import *
-from plugins import web_server
 from plugins.index import Media, check_pending_index_on_startup
 from utils import close_http_session, db, temp
 
@@ -21,6 +20,9 @@ errors_file.setFormatter(logging.Formatter(
     "[%(asctime)s:%(name)s:%(lineno)d:%(levelname)s] %(message)s", "%m/%d/%Y %I:%M:%S %p"))
 logging.basicConfig(level=logging.INFO, handlers=[console, errors_file], force=True)
 logging.getLogger("pyrogram").setLevel(logging.ERROR)
+
+async def health(request):
+    return web.json_response("BenFilterBot")
 
 async def delete_later(message, seconds):
     await asyncio.sleep(seconds)
@@ -64,9 +66,11 @@ class Bot(Client):
             if manual_restart:
                 asyncio.create_task(delete_later(restart_msg, 10))
 
-        app = web.AppRunner(await web_server())
-        await app.setup()
-        await web.TCPSite(app, "0.0.0.0", PORT).start()
+        web_app = web.Application()
+        web_app.router.add_get("/", health)
+        runner = web.AppRunner(web_app)
+        await runner.setup()
+        await web.TCPSite(runner, "0.0.0.0", PORT).start()
         await check_pending_index_on_startup(self)
 
     async def stop(self, *args):
