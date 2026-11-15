@@ -7,6 +7,7 @@ from struct import pack
 
 from marshmallow.exceptions import ValidationError
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import UpdateOne
 from pymongo.errors import DuplicateKeyError
 from pyrogram import Client, enums, filters
 from pyrogram.errors import ChannelInvalid, ChannelPrivate, FloodWait, PeerIdInvalid, UsernameInvalid, UsernameNotModified
@@ -15,7 +16,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from umongo import Document, Instance, fields
 
 from info import *
-from utils import connected_group, extract_v2, temp
+from utils import connected_group, extract_v2, field, pretty_name, temp
 
 client = AsyncIOMotorClient(DATABASE_URI)
 mongo_db = client[DATABASE_NAME]
@@ -45,6 +46,9 @@ async def normalize_for_search(text: str) -> str:
     text = normalize_basic_episode(str(text or ""))
     return " ".join(LANG_CODES.get(word, word) for word in normalize(text))
 
+async def index_name(text: str) -> str:
+    return pretty_name(await normalize_for_search(text))
+
 @instance.register
 class Media(Document):
     file_id = fields.StrField(attribute="_id")
@@ -72,7 +76,7 @@ async def save_file(media):
         source_text = media.caption
 
     source_text = str(source_text)[:1000]
-    normalized_name = await normalize_for_search(source_text)
+    normalized_name = await index_name(source_text)
 
     try:
         file = Media(
@@ -201,6 +205,29 @@ async def get_search_results(
         next_offset = ""
 
     return files, next_offset, total_results
+
+async def prettify_stored_names(progress=None, batch_size=1000):
+    scanned = changed = 0
+    last_id = None
+    while True:
+        mongo_filter = {} if last_id is None else {"_id": {"$gt": last_id}}
+        docs = await Media.collection.find(mongo_filter, {"file_name": 1}).sort("_id", 1).limit(batch_size).to_list(length=batch_size)
+        if not docs:
+            return scanned, changed
+        updates = []
+        for doc in docs:
+            old = doc.get("file_name") or ""
+            new = await index_name(old)
+            if new and new != old:
+                updates.append(UpdateOne({"_id": doc["_id"]}, {"$set": {"file_name": new}}))
+        if updates:
+            await Media.collection.bulk_write(updates, ordered=False)
+        scanned += len(docs)
+        changed += len(updates)
+        last_id = docs[-1]["_id"]
+        if progress:
+            await progress(scanned, changed)
+        await asyncio.sleep(0)
 
 def bad_files_filter(query):
     words = normalize(query)
@@ -338,11 +365,11 @@ async def notify_owner(bot, text, reply_markup=None):
 @Client.on_callback_query(filters.regex(r'^index'))
 async def index_files(bot, query):
     if not query.from_user or query.from_user.id not in ADMINS:
-        return await query.answer("Unauthorized!", show_alert=True)
+        return await query.answer("⛔ Unauthorized", show_alert=True)
     if query.data.startswith('index_cancel'):
         temp.CANCEL = True
         await clear_index_state()
-        return await query.answer("Cancelling Indexing")
+        return await query.answer("🚫 Cancelling Indexing...")
 
     if query.data == 'index_status':
         current_progress = getattr(temp, 'CURRENT', 0)
@@ -350,28 +377,28 @@ async def index_files(bot, query):
         total_dup = getattr(temp, 'DUP', 0)
         total_del = getattr(temp, 'DEL', 0)
         return await query.answer(
-            f"📊 Live Index Status:\n"
-            f"● Processed: {current_progress}\n"
-            f"● Saved: {total_saved}\n"
-            f"● Duplicates: {total_dup}\n"
-            f"● Deleted: {total_del}",
+            "📊 Live Index Status\n━━━━━━━━━━━━━━\n"
+            f"📥 Processed: {current_progress:,}\n"
+            f"🗃 Saved: {total_saved:,}\n"
+            f"♻️ Duplicates: {total_dup:,}\n"
+            f"🗑 Deleted: {total_del:,}",
             show_alert=True
         )
 
     try:
         _, raju, chat, lst_msg_id = query.data.split("#")
     except (ValueError, AttributeError):
-        return await query.answer("Invalid index request.", show_alert=True)
+        return await query.answer("❌ Invalid index request", show_alert=True)
     if raju == 'reject':
         await query.message.delete()
         return
     if lock.locked():
-        return await query.answer('Wait Until Previous Index is Finished', show_alert=True)
+        return await query.answer("⏳ Wait until the previous index is finished", show_alert=True)
     msg = query.message
-    await query.answer('Processing...⏳', show_alert=True)
+    await query.answer("⏳ Processing...", show_alert=True)
     temp.CANCEL = False
     await msg.edit(
-        "Starting Indexing",
+        "<b>⏳ Starting Indexing...</b>",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton('📊 Check Live Status', callback_data='index_status')],
              [InlineKeyboardButton('❌ Cancel ❌', callback_data='index_cancel')]]
@@ -383,22 +410,19 @@ async def index_files(bot, query):
         pass
     asyncio.create_task(index_files_to_db(int(lst_msg_id), chat, msg, bot))
 
+INDEX_LINK_RE = re.compile(r"^(https?://)?(t\.me/|telegram\.me/|telegram\.dog/)(c/)?(\d+|(?!c/)[a-zA-Z_0-9]+)/(\d+)$")
+
 @Client.on_message(
-    (filters.forwarded | (filters.regex(
-        r"(https://)?(t\.me/|telegram\.me/|telegram\.dog/)(c/)?(\d+|[a-zA-Z_0-9]+)/(\d+)$"
-    )) & filters.text) & filters.private & filters.incoming
+    (filters.forwarded | (filters.regex(INDEX_LINK_RE) & filters.text)) & filters.private & filters.incoming
 )
 async def send_for_index(bot, message):
     if message.from_user.id not in ADMINS:
         return
 
     if message.text:
-        regex = re.compile(
-            r"(https://)?(t\.me/|telegram\.me/|telegram\.dog/)(c/)?(\d+|[a-zA-Z_0-9]+)/(\d+)$"
-        )
-        match = regex.match(message.text)
+        match = INDEX_LINK_RE.match(message.text)
         if not match:
-            return await message.reply('Invalid link')
+            return await message.reply("<b>❌ Invalid link</b>")
         chat_id = match.group(4)
         last_msg_id = int(match.group(5))
         if chat_id.isnumeric():
@@ -413,24 +437,24 @@ async def send_for_index(bot, message):
         await bot.get_chat(chat_id)
     except ChannelInvalid:
         return await message.reply(
-            '📮This Channel Is Private, Make Me Admin In The Channel To Index The Files'
+            "<b>🔒 This channel is private. Make me an admin there to index its files</b>"
         )
     except (UsernameInvalid, UsernameNotModified):
-        return await message.reply('Invalid Link specified.')
+        return await message.reply("<b>❌ Invalid link specified</b>")
     except Exception as e:
         logger.exception(e)
-        return await message.reply(f'Errors - {e}')
+        return await message.reply(field("❌ Error", e))
 
     try:
         k = await bot.get_messages(chat_id, last_msg_id)
     except:
         return await message.reply(
-            'Make Sure That I am An Admin In The Channel, if channel is private'
+            "<b>🔒 Make sure I am an admin in the channel if it is private</b>"
         )
 
     if k.empty:
         return await message.reply(
-            'This may be a group and I am not an admin of the group.'
+            "<b>⚠️ This may be a group and I am not an admin of it</b>"
         )
     buttons = [[
         InlineKeyboardButton(
@@ -441,8 +465,8 @@ async def send_for_index(bot, message):
     ]]
 
     return await message.reply(
-        f'<b>❓ Index This Channel Files ❓</b>\n\n'
-        f'🗳 <b>Chat ID/Username ›</b> <code>{chat_id}</code>',
+        "<b>❓ Index This Channel's Files?\n━━━━━━━━━━━━━━</b>\n"
+        f"{field('🆔 Chat', chat_id)}",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -461,15 +485,18 @@ def parse_skip(value):
 async def set_skip_number(bot, message):
     if len(message.command) < 2:
         return await message.reply(
-            "Give me a skip number or a message link.\n\n"
+            "<b>⚠️ Give me a skip number or a message link\n\nExample:</b>\n"
             "<code>/setskip 624766</code>\n"
             "<code>/setskip https://t.me/c/1725696043/624766</code>"
         )
     skip = parse_skip(message.command[1])
     if skip is None:
-        return await message.reply("Skip should be a message number or a message link like https://t.me/c/1725696043/624766")
+        return await message.reply(
+            "<b>❌ Skip should be a message number or a message link\n\nExample:</b>\n"
+            "<code>https://t.me/c/1725696043/624766</code>"
+        )
     temp.CURRENT = skip
-    await message.reply(f"📲 SKIP Number set: {skip}")
+    await message.reply(field("📲 Skip Number Set", skip))
 
 async def iter_index_messages(bot, chat_id, limit, offset=0):
     current = offset
@@ -508,7 +535,7 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, res
                 await clear_index_state()
                 logger.error("Unable to resolve indexing chat %s: %s", chat, e)
                 try:
-                    await msg.edit("❌ Indexing stopped: the source channel is no longer accessible to this session.")
+                    await msg.edit("<b>❌ Indexing Stopped\n\nThe source channel is no longer accessible</b>")
                 except Exception:
                     pass
                 return
@@ -520,10 +547,10 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, res
                 if temp.CANCEL:
                     try:
                         await msg.edit(
-                            f"<b>Cancelled Index</b> 🚫\n\n"
-                            f"● Saved Files: {total_files}\n"
-                            f"● Duplicate Files: {duplicate}\n"
-                            f"● Deleted Messages: {deleted}"
+                            "<b>🚫 Indexing Cancelled\n━━━━━━━━━━━━━━\n"
+                            f"🗃 Saved: {total_files:,}\n"
+                            f"♻️ Duplicates: {duplicate:,}\n"
+                            f"🗑 Deleted Messages: {deleted:,}</b>"
                         )
                     except FloodWait as e:
                         logger.warning(f"FloodWait while cancelling: {e.value} seconds.")
@@ -542,10 +569,11 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, res
                     await save_index_state(chat, lst_msg_id, current, total_files, duplicate, deleted, access_hash)
                     try:
                         await msg.edit_text(
-                            text=f"● Messages Fetched: <code>{current}</code>\n"
-                                 f"● Saved: {total_files}\n"
-                                 f"● Duplicates: {duplicate}\n"
-                                 f"● Deleted: {deleted}",
+                            text="<b>📊 Indexing In Progress\n━━━━━━━━━━━━━━\n"
+                                 f"📥 Messages Fetched: {current:,}\n"
+                                 f"🗃 Saved: {total_files:,}\n"
+                                 f"♻️ Duplicates: {duplicate:,}\n"
+                                 f"🗑 Deleted: {deleted:,}</b>",
                             reply_markup=InlineKeyboardMarkup(
                                 [[InlineKeyboardButton('📊 Check Live Status', callback_data='index_status')],
                                  [InlineKeyboardButton('Cancel', callback_data='index_cancel')]]
@@ -586,15 +614,15 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, res
             logger.exception(e)
             error_text = str(e)
             try:
-                await msg.edit(f'Error: {error_text}')
+                await msg.edit(field("❌ Error", error_text))
             except FloodWait as flood:
                 logger.warning(f"FloodWait while sending error: {flood.value} seconds.")
             await notify_owner(
                 bot,
-                f"<b>❌ Indexing Stopped</b>\n━━━━━━━━━━━━━━\n"
+                "<b>❌ Indexing Stopped\n━━━━━━━━━━━━━━\n"
                 f"📢 Channel: {escape(str(getattr(chat_info, 'title', None) or chat))}\n"
-                f"📊 Processed: {temp.CURRENT}\n"
-                f"❗ Error: {escape(error_text)}"
+                f"📊 Processed: {temp.CURRENT:,}\n"
+                f"❗ Error: {escape(error_text)}</b>"
             )
         else:
             temp.CURRENT = 0
@@ -603,19 +631,20 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, res
                 return
             try:
                 await msg.edit(
-                    f'<b>🔆 Saved "{total_files}" Files!</b>\n\n'
-                    f'● Duplicates: {duplicate}\n'
-                    f'● Deleted: {deleted}'
+                    "<b>✅ Indexing Completed\n━━━━━━━━━━━━━━\n"
+                    f"🗃 Saved: {total_files:,}\n"
+                    f"♻️ Duplicates: {duplicate:,}\n"
+                    f"🗑 Deleted Messages: {deleted:,}</b>"
                 )
             except FloodWait as e:
                 logger.warning(f"FloodWait while sending final result: {e.value} seconds.")
             await notify_owner(
                 bot,
-                f"<b>✅ Indexing Completed</b>\n━━━━━━━━━━━━━━\n"
+                "<b>✅ Indexing Completed\n━━━━━━━━━━━━━━\n"
                 f"📢 Channel: {escape(str(getattr(chat_info, 'title', None) or chat))}\n"
-                f"🗃 Saved: {total_files}\n"
-                f"♻️ Duplicates: {duplicate}\n"
-                f"🗑 Deleted Messages: {deleted}"
+                f"🗃 Saved: {total_files:,}\n"
+                f"♻️ Duplicates: {duplicate:,}\n"
+                f"🗑 Deleted Messages: {deleted:,}</b>"
             )
 
 async def check_pending_index_on_startup(client):
@@ -638,12 +667,12 @@ async def check_pending_index_on_startup(client):
         logger.exception("Could not resume the pending index for %s", chat_id)
         await notify_owner(
             client,
-            f"<b>⚠️ Could Not Resume Indexing</b>\n━━━━━━━━━━━━━━\n"
-            f"📢 Chat: <code>{chat_id}</code>\n"
-            f"📊 Processed: {current}\n"
-            f"❗ Reason: {escape(str(e))}\n\n"
-            f"Make sure the bot is still in that channel, then run <code>/setskip {current}</code> and send the "
-            f"channel link again to continue from here.",
+            "<b>⚠️ Could Not Resume Indexing\n━━━━━━━━━━━━━━\n"
+            f"📊 Processed: {current:,}\n"
+            f"❗ Reason: {escape(str(e))}</b>\n"
+            f"{field('🆔 Chat', chat_id)}\n\n"
+            f"<b>Make sure the bot is still in that channel, then run</b> <code>/setskip {current}</code> "
+            "<b>and send the channel link again to continue from here</b>",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🗑 Discard Pending Index', callback_data='index_cancel')]]),
         )
         return
@@ -652,7 +681,9 @@ async def check_pending_index_on_startup(client):
         try:
             msg = await client.send_message(
                 admin_id,
-                f"🔄 **Resuming Interrupted Indexing Task**\n● Processed: {current}\n● Saved: {saved}",
+                "<b>🔄 Resuming Interrupted Indexing\n━━━━━━━━━━━━━━\n"
+                f"📥 Processed: {current:,}\n"
+                f"🗃 Saved: {saved:,}</b>",
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton('📊 Check Live Status', callback_data='index_status')],
                      [InlineKeyboardButton('Cancel', callback_data='index_cancel')]]
@@ -677,7 +708,7 @@ async def caption_edit_handler(client, message):
 
     try:
         file_id, _ = unpack_new_file_id(media.file_id)
-        normalized_name = await normalize_for_search(source_text)
+        normalized_name = await index_name(source_text)
 
         result = await Media.collection.update_one(
             {"_id": file_id},

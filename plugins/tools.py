@@ -11,8 +11,8 @@ from pyrogram.errors import FloodWait, MessageNotModified, MessageTooLong, PeerI
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from info import *
-from plugins.index import Media, count_bad_files, delete_bad_files, normalize, unpack_new_file_id
-from utils import broadcast_messages, connected_group, db, get_settings, is_group_connected, save_group_settings
+from plugins.index import Media, count_bad_files, delete_bad_files, normalize, prettify_stored_names, unpack_new_file_id
+from utils import broadcast_messages, connected_group, db, field, get_settings, is_group_connected, save_group_settings, user_link
 
 BROADCAST_CANCEL = set()
 
@@ -63,8 +63,8 @@ async def broadcast_users(bot, message):
     ])
 
     sts = await message.reply_text(
-        f"📢 <b>Broadcast Started</b>\n\n"
-        f"👥 Total Users: {total_users}",
+        f"<b>📢 Broadcast Started\n\n"
+        f"👥 Total Users: {total_users:,}</b>",
         reply_markup=markup,
     )
 
@@ -82,9 +82,9 @@ async def broadcast_users(bot, message):
             success += 1
         if success and success % 20 == 0:
             await sts.edit_text(
-                f"📢 <b>Broadcasting...</b>\n\n"
-                f"👥 Total Users: {total_users}\n"
-                f"✅ Sent: {success}",
+                f"<b>📡 Broadcasting...\n\n"
+                f"👥 Total Users: {total_users:,}\n"
+                f"✅ Sent: {success:,}</b>",
                 reply_markup=markup,
             )
 
@@ -93,15 +93,15 @@ async def broadcast_users(bot, message):
 
     if cancelled:
         await sts.edit_text(
-            f"🛑 <b>Broadcast Cancelled</b>\n\n"
-            f"👥 Total Users: {total_users}\n"
-            f"✅ Successful: {success}"
+            f"<b>🛑 Broadcast Cancelled\n\n"
+            f"👥 Total Users: {total_users:,}\n"
+            f"✅ Sent: {success:,}</b>"
         )
     else:
         await sts.edit_text(
-            f"✅ <b>Broadcast Completed</b>\n\n"
-            f"👥 Total Users: {total_users}\n"
-            f"✅ Successful: {success}"
+            f"<b>✅ Broadcast Completed\n\n"
+            f"👥 Total Users: {total_users:,}\n"
+            f"✅ Sent: {success:,}</b>"
         )
 
 @Client.on_callback_query(filters.regex(r"^cancel_broadcast#"))
@@ -111,31 +111,30 @@ async def cancel_broadcast(bot, query):
         admin_id = int(admin_id)
     except ValueError:
         return await query.answer(
-            "Invalid request.",
+            "❌ Invalid request",
             show_alert=True
         )
 
     if query.from_user.id != admin_id:
         return await query.answer(
-            "This is not your broadcast.",
+            "⛔ This is not your broadcast",
             show_alert=True
         )
 
     BROADCAST_CANCEL.add(("users", admin_id))
 
-    await query.answer("🛑 Broadcast cancelling...")
+    await query.answer("🛑 Cancelling broadcast...")
 
 DB_STORAGE_LIMIT = 512 * 1024 * 1024
 
 @Client.on_message(filters.command("stats") & filters.incoming & filters.user(ADMINS) & connected_group)
 async def get_stats(bot, message):
-    reply = await message.reply("Fetching stats...")
     files = await Media.count_documents()
     users = await db.total_users_count()
     chats = await db.total_chat_count()
     used = await db.get_db_size()
     free_percent = max(0, DB_STORAGE_LIMIT - used) * 100 / DB_STORAGE_LIMIT
-    await reply.edit(
+    await message.reply(
         f"<b>🗃 Fɪʟᴇs: {files:,} | 👤 Usᴇʀs: {users:,}\n"
         f"🗨 Cʜᴀᴛs: {chats:,} | 💾 Sᴛᴏʀᴀɢᴇ: {free_percent:.0f}% Fʀᴇᴇ</b>"
     )
@@ -143,7 +142,7 @@ async def get_stats(bot, message):
 @Client.on_message(filters.command("ban") & filters.user(ADMINS) & connected_group)
 async def ban_user(bot, message):
     if len(message.command) == 1:
-        return await message.reply("Give me a user id / username")
+        return await message.reply("<b>⚠️ Give me a user ID or username\n\nExample:</b> <code>/ban 123456789 spam</code>")
 
     target = message.command[1]
     reason = message.text.split(None, 2)[2] if len(message.text.split(None, 2)) > 2 else "No reason provided"
@@ -151,112 +150,121 @@ async def ban_user(bot, message):
     try:
         user = await bot.get_users(int(target) if target.lstrip("-").isdigit() else target)
     except PeerIdInvalid:
-        return await message.reply("Invalid user.")
+        return await message.reply("<b>❌ Invalid user</b>")
     except Exception as e:
-        return await message.reply(f"Error - {e}")
+        return await message.reply(field("❌ Error", e))
 
     status = await db.get_ban_status(user.id)
     if status["is_banned"]:
-        return await message.reply(f"{user.mention} is already banned.")
+        return await message.reply(f"<b>⚠️ {user_link(user.id, user.first_name)} is already banned</b>")
 
     await db.ban_user(user.id, reason)
     try:
-        await message.reply(f"Successfully banned {user.mention}")
+        await message.reply(
+            "<b>🚫 User Banned\n━━━━━━━━━━━━━━\n"
+            f"👤 Name: {user_link(user.id, user.first_name)}</b>\n"
+            f"{field('🆔 ID', user.id)}\n"
+            f"<b>📝 Reason: {escape(reason)}</b>"
+        )
     except Exception:
         pass
 
 @Client.on_message(filters.command("unban") & filters.user(ADMINS) & connected_group)
 async def unban_user(bot, message):
     if len(message.command) == 1:
-        return await message.reply("Give me a user id / username")
+        return await message.reply("<b>⚠️ Give me a user ID or username\n\nExample:</b> <code>/unban 123456789</code>")
 
     target = message.command[1]
     try:
         user = await bot.get_users(int(target) if target.lstrip("-").isdigit() else target)
     except Exception as e:
-        return await message.reply(f"Error - {e}")
+        return await message.reply(field("❌ Error", e))
 
     status = await db.get_ban_status(user.id)
     if not status["is_banned"]:
-        return await message.reply(f"{user.mention} is not banned.")
+        return await message.reply(f"<b>⚠️ {user_link(user.id, user.first_name)} is not banned</b>")
 
     await db.remove_ban(user.id)
-    await message.reply(f"Successfully unbanned {user.mention}")
+    await message.reply(
+        "<b>✅ User Unbanned\n━━━━━━━━━━━━━━\n"
+        f"👤 Name: {user_link(user.id, user.first_name)}</b>\n"
+        f"{field('🆔 ID', user.id)}"
+    )
+
+async def reply_list_or_file(message, text, plain_lines, filename, caption, max_items):
+    if len(plain_lines) <= max_items:
+        try:
+            return await message.reply(text)
+        except MessageTooLong:
+            pass
+    with open(filename, "w", encoding="utf-8") as outfile:
+        outfile.write("\n".join(plain_lines))
+    await message.reply_document(filename, caption=caption)
 
 @Client.on_message(filters.command("users") & filters.user(ADMINS) & connected_group)
 async def list_users(bot, message):
-    reply = await message.reply("Getting user list...")
-    out = "Users Saved In DB Are:\n\n"
-
+    lines, plain = [], []
     users = await db.get_all_users()
     async for user in users:
-        out += f'<a href="tg://user?id={user["id"]}">{user["name"]}</a>'
-        if user.get("ban_status", {}).get("is_banned"):
-            out += " (Banned User)"
-        out += "\n"
+        banned = user.get("ban_status", {}).get("is_banned")
+        lines.append(f"👤 {user_link(user['id'], user.get('name'))}{' 🚫' if banned else ''}")
+        plain.append(f"{user['id']} | {user.get('name') or 'User'}{' | Banned' if banned else ''}")
 
-    try:
-        await reply.edit_text(out)
-    except MessageTooLong:
-        with open("users.txt", "w", encoding="utf-8") as outfile:
-            outfile.write(out)
-        await message.reply_document("users.txt", caption="List Of Users")
+    text = "<b>👥 Users Saved In DB\n━━━━━━━━━━━━━━\n\n" + "\n".join(lines) + "</b>"
+    await reply_list_or_file(message, text, plain, "users.txt", f"<b>👥 Total Users: {len(plain):,}</b>", 90)
 
 @Client.on_message(filters.command("chats") & filters.user(ADMINS) & connected_group)
 async def list_chats(bot, message):
-    reply = await message.reply("Getting list of chats...")
-    out = "Connected Chats:\n\n"
-
+    lines, plain = [], []
     chats = await db.get_all_chats()
     async for chat in chats:
-        out += f'**Title:** `{chat.get("title", "Unknown")}`\n**ID:** `{chat["id"]}`\n\n'
+        title = chat.get("title", "Unknown")
+        lines.append(f"<b>💬 {escape(str(title))}</b>\n{field('🆔 ID', chat['id'])}\n")
+        plain.append(f"{chat['id']} | {title}")
 
-    try:
-        await reply.edit_text(out)
-    except MessageTooLong:
-        with open("chats.txt", "w", encoding="utf-8") as outfile:
-            outfile.write(out)
-        await message.reply_document("chats.txt", caption="Connected Chats")
+    text = "<b>🗨 Connected Chats\n━━━━━━━━━━━━━━</b>\n\n" + "\n".join(lines)
+    await reply_list_or_file(message, text, plain, "chats.txt", f"<b>🗨 Total Chats: {len(plain):,}</b>", 30)
 
 @Client.on_message(filters.command('channel') & filters.user(ADMINS))
 async def channel_info(bot, message):
     channels = CHANNELS if isinstance(CHANNELS, list) else [CHANNELS]
-    text = '📑 **Indexed channels/groups**\n'
+    text = "<b>📑 Indexed Channels\n━━━━━━━━━━━━━━</b>\n"
     for channel in channels:
         try:
             chat = await bot.get_chat(channel)
-            text += '\n@' + chat.username if chat.username else '\n' + (chat.title or chat.first_name)
         except Exception:
             continue
-    text += f'\n\n**Total:** {len(channels)}'
+        name = escape(str(chat.title or chat.first_name or channel))
+        text += f"\n<b>📢 {name}</b>"
+        if chat.username:
+            text += f" <code>@{chat.username}</code>"
+    text += f"\n\n<b>📊 Total: {len(channels)}</b>"
     await message.reply(text)
 
 @Client.on_message(filters.command('delete') & filters.user(ADMINS))
 async def delete(bot, message):
     reply = message.reply_to_message
     if not reply or not reply.media:
-        return await message.reply('Reply to file with /delete which you want to delete', quote=True)
+        return await message.reply("<b>⚠️ Reply to a file with</b> <code>/delete</code> <b>to remove it</b>", quote=True)
 
-    msg = await message.reply("Processing...⏳", quote=True)
     for file_type in ("document", "video", "audio"):
         media = getattr(reply, file_type, None)
         if media is not None:
             break
     else:
-        return await msg.edit('This is not supported file format')
+        return await message.reply("<b>❌ This file type is not supported</b>", quote=True)
 
     file_id, _ = unpack_new_file_id(media.file_id)
     result = await Media.collection.delete_one({'_id': file_id})
-    if result.deleted_count:
-        return await msg.edit('🛃 Deleted File!')
 
-    file_name = re.sub(r"(_|\-|\.|\+)", " ", str(media.file_name))
-    result = await Media.collection.delete_many({'file_name': file_name, 'file_size': media.file_size, 'mime_type': media.mime_type})
-    if result.deleted_count:
-        return await msg.edit('🛃 Deleted File!')
+    if not result.deleted_count:
+        file_name = re.sub(r"(_|\-|\.|\+)", " ", str(media.file_name))
+        result = await Media.collection.delete_many({'file_name': file_name, 'file_size': media.file_size, 'mime_type': media.mime_type})
 
-    result = await Media.collection.delete_many({'file_name': media.file_name, 'file_size': media.file_size, 'mime_type': media.mime_type})
-    await msg.edit('🛃 Deleted File!' if result.deleted_count else 'File not found in database')
+    if not result.deleted_count:
+        result = await Media.collection.delete_many({'file_name': media.file_name, 'file_size': media.file_size, 'mime_type': media.mime_type})
+
+    await message.reply("<b>🗑 File Deleted</b>" if result.deleted_count else "<b>❌ File not found in database</b>", quote=True)
 
 DELETE_REQUEST_TTL = 600
 
@@ -278,20 +286,19 @@ async def deletemultiplefiles(bot, message):
     keyword = parts[1].strip() if len(parts) > 1 else ""
     if not normalize(keyword):
         return await message.reply_text(
-            f"<b>Hey {message.from_user.mention}, give me a keyword along with the command.\n"
-            "Example: <code>/deletefiles avatar 2009</code></b>"
+            "<b>⚠️ Give me a keyword along with the command\n\nExample:</b> <code>/deletefiles avatar 2009</code>"
         )
 
-    status = await message.reply_text("<b>♻️ Please Wait!</b>")
+    status = await message.reply_text(field("⏳ Searching Files", keyword))
     total = await count_bad_files(keyword)
     if not total:
-        return await edit_text_safely(status, f"<b>No files found ➠ {escape(keyword)}</b>")
+        return await edit_text_safely(status, field("❌ No Files Found", keyword))
 
     token = secrets.token_hex(4)
     await db.set_cache(f"deletefiles:{token}", {"keyword": keyword}, ttl=DELETE_REQUEST_TTL)
     await edit_text_safely(
         status,
-        f"<b>{total:,} Files ➠ {escape(keyword)}</b>",
+        field(f"🗂 {total:,} Files Found", keyword),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🛃 Delete Files!", callback_data=f"killfilesdq#{token}")],
             [InlineKeyboardButton("💢 Cancel 💢", callback_data="close_data")],
@@ -301,37 +308,40 @@ async def deletemultiplefiles(bot, message):
 @Client.on_callback_query(filters.regex(r"^killfilesdq#"))
 async def deletefiles_confirm(bot, query):
     if query.from_user.id not in ADMINS:
-        return await query.answer("Only bot admins can delete files.", show_alert=True)
+        return await query.answer("⛔ Only bot admins can delete files", show_alert=True)
 
     request = await db.pop_cache(f"deletefiles:{query.data.split('#', 1)[1]}")
     if not request:
-        return await query.answer("This request has expired or was already used. Run /deletefiles again.", show_alert=True)
+        return await query.answer("⌛ This request expired or was already used. Run /deletefiles again", show_alert=True)
 
     keyword = request["keyword"]
-    await query.answer("Deleting...")
-    await edit_text_safely(query.message, f"<b>♻️ Deleting files ➠ {escape(keyword)}</b>")
+    await query.answer("♻️ Deleting...")
+    await edit_text_safely(query.message, field("♻️ Deleting Files", keyword))
     try:
         deleted = await delete_bad_files(keyword)
     except Exception:
         logging.getLogger(__name__).exception("Deleting files for %r failed", keyword)
-        return await edit_text_safely(query.message, "<b>❌ Deleting failed. Check /logs, then run /deletefiles again.</b>")
-    await edit_text_safely(query.message, f"<b>✅ Deleted {deleted:,} files ➠ {escape(keyword)}</b>")
+        return await edit_text_safely(
+            query.message,
+            "<b>❌ Deleting Failed\n\nCheck</b> <code>/logs</code><b>, then run</b> <code>/deletefiles</code> <b>again</b>",
+        )
+    await edit_text_safely(query.message, field(f"✅ Deleted {deleted:,} Files", keyword))
 
 @Client.on_callback_query(filters.regex(r'^setgs#'))
 async def settings_callback(client, callback):
     if callback.from_user.id not in ADMINS:
-        return await callback.answer("Only bot admins can change settings.", show_alert=True)
+        return await callback.answer("⛔ Only bot admins can change settings", show_alert=True)
     try:
         _, setting, _ = callback.data.split("#")
     except Exception:
-        return await callback.answer("Invalid setting.", show_alert=True)
+        return await callback.answer("❌ Invalid setting", show_alert=True)
     if setting not in {"spell_check", "is_shortlink"}:
-        return await callback.answer("Invalid setting.", show_alert=True)
+        return await callback.answer("❌ Invalid setting", show_alert=True)
 
     chat_id = callback.message.chat.id
     if chat_id and callback.message.chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
         if not await is_group_connected(chat_id):
-            return await callback.answer("This group is disconnected.", show_alert=True)
+            return await callback.answer("⚠️ This group is disconnected", show_alert=True)
     settings = await get_settings(chat_id)
     current = bool(settings.get(setting))
     await save_group_settings(chat_id, setting, not current)
@@ -340,17 +350,17 @@ async def settings_callback(client, callback):
         await callback.message.edit_reply_markup(reply_markup=get_settings_keyboard(settings))
     except Exception:
         pass
-    await callback.answer("Updated")
+    await callback.answer("✅ Updated")
 
 @Client.on_message(filters.command('settings') & filters.user(ADMINS))
 async def settings(client, message):
     if message.chat.type not in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-        return await message.reply_text("Use /settings inside a connected group.")
+        return await message.reply_text("<b>⚠️ Use</b> <code>/settings</code> <b>inside a connected group</b>")
     if not await is_group_connected(message.chat.id):
         return
     settings = await get_settings(message.chat.id)
     await message.reply_text(
-        f"<b>⚙️ Settings For {message.chat.title}</b>",
+        f"<b>⚙️ Settings For {escape(str(message.chat.title))}</b>",
         reply_markup=get_settings_keyboard(settings),
         parse_mode=enums.ParseMode.HTML,
         reply_to_message_id=message.id,
@@ -359,24 +369,23 @@ async def settings(client, message):
 @Client.on_message(filters.command("shortlink1") & filters.user(ADMINS))
 async def update_shortlink1(bot, message):
     if message.chat.type == enums.ChatType.PRIVATE:
-        return await message.reply_text("<b>Only works in groups !</b>")
+        return await message.reply_text("<b>⚠️ Only works in groups!</b>")
     if not await is_group_connected(message.chat.id):
-        return await message.reply_text("Connect this group first with /connect.")
+        return await message.reply_text("<b>⚠️ Connect this group first with</b> <code>/connect</code>")
     try:
         _, shortlink_url, api = message.text.split(" ", 2)
     except Exception:
-        return await message.reply_text("<b>Wrong Format. Example - /shortlink1 softurl.in YOUR_API</b>")
+        return await message.reply_text("<b>❌ Wrong Format\n\nExample:</b> <code>/shortlink1 softurl.in YOUR_API</code>")
 
-    reply = await message.reply_text("<b>Please Wait...</b>")
     shortlink_url = re.sub(r"[:/]", "", re.sub(r"https?://?", "", shortlink_url))
     await save_group_settings(message.chat.id, 'shortlink', shortlink_url)
     await save_group_settings(message.chat.id, 'shortlink_api', api)
     await save_group_settings(message.chat.id, 'is_shortlink', True)
-    await reply.edit_text(
+    reply = await message.reply_text(
         "<b>🔆 Primary Shortener Updated:-\n"
-        "━━━━━━━━━━━━━━\n"
-        f"🗃 Site: <code>{escape(shortlink_url)}</code>\n"
-        f"🔐 API: <code>{escape(api)}</code></b>"
+        "━━━━━━━━━━━━━━</b>\n"
+        f"{field('🗃 Site', shortlink_url)}\n"
+        f"{field('🔐 API', api)}"
     )
     await asyncio.sleep(10)
     await reply.delete()
@@ -384,24 +393,23 @@ async def update_shortlink1(bot, message):
 @Client.on_message(filters.command("shortlink2") & filters.user(ADMINS))
 async def update_shortlink2(bot, message):
     if message.chat.type == enums.ChatType.PRIVATE:
-        return await message.reply_text("<b>Only works in groups !</b>")
+        return await message.reply_text("<b>⚠️ Only works in groups!</b>")
     if not await is_group_connected(message.chat.id):
-        return await message.reply_text("Connect this group first with /connect.")
+        return await message.reply_text("<b>⚠️ Connect this group first with</b> <code>/connect</code>")
     try:
         _, shortlink_url, api = message.text.split(" ", 2)
     except Exception:
-        return await message.reply_text("<b>Wrong Format. Example - /shortlink2 nowshort.com YOUR_API</b>")
+        return await message.reply_text("<b>❌ Wrong Format\n\nExample:</b> <code>/shortlink2 nowshort.com YOUR_API</code>")
 
-    reply = await message.reply_text("<b>Please Wait...</b>")
     shortlink_url = re.sub(r"[:/]", "", re.sub(r"https?://?", "", shortlink_url))
     await save_group_settings(message.chat.id, 'second_shortlink', shortlink_url)
     await save_group_settings(message.chat.id, 'second_shortlink_api', api)
     await save_group_settings(message.chat.id, 'is_shortlink', True)
-    await reply.edit_text(
+    reply = await message.reply_text(
         "<b>🔆 Backup Shortener Updated\n"
-        "━━━━━━━━━━━━━━\n"
-        f"🗃 Site: <code>{escape(shortlink_url)}</code>\n"
-        f"🔐 API: <code>{escape(api)}</code></b>"
+        "━━━━━━━━━━━━━━</b>\n"
+        f"{field('🗃 Site', shortlink_url)}\n"
+        f"{field('🔐 API', api)}"
     )
     await asyncio.sleep(10)
     await reply.delete()
@@ -411,12 +419,12 @@ SHORTENERS_VISIBLE_SECONDS = 30
 
 def shorteners_text(settings: dict) -> str:
     return (
-        "🎛 Shortener Settings:-\n"
-        "━━━━━━━━━━━\n"
-        f"🗃 Primary: `{settings.get('shortlink') or SHORT1_URL}`\n"
-        f"🔐 API: `{settings.get('shortlink_api') or SHORT1_API}`\n"
-        f"🗃 Backup: `{settings.get('second_shortlink') or SHORT2_URL}`\n"
-        f"🔐 API: `{settings.get('second_shortlink_api') or SHORT2_API}`"
+        "<b>🎛 Shortener Settings:-\n"
+        "━━━━━━━━━━━</b>\n"
+        f"{field('🗃 Primary', settings.get('shortlink') or SHORT1_URL)}\n"
+        f"{field('🔐 API', settings.get('shortlink_api') or SHORT1_API)}\n"
+        f"{field('🗃 Backup', settings.get('second_shortlink') or SHORT2_URL)}\n"
+        f"{field('🔐 API', settings.get('second_shortlink_api') or SHORT2_API)}"
     )
 
 def shorteners_keyboard() -> InlineKeyboardMarkup:
@@ -425,15 +433,15 @@ def shorteners_keyboard() -> InlineKeyboardMarkup:
 @Client.on_message(filters.command("shorteners") & filters.user(ADMINS))
 async def view_shorteners(bot, message):
     if message.chat.type == enums.ChatType.PRIVATE:
-        return await message.reply_text("<b>Only works in groups !</b>")
+        return await message.reply_text("<b>⚠️ Only works in groups!</b>")
     if not await is_group_connected(message.chat.id):
-        return await message.reply_text("Connect this group first with /connect.")
+        return await message.reply_text("<b>⚠️ Connect this group first with</b> <code>/connect</code>")
     settings = await get_settings(message.chat.id)
 
     sent_message = await message.reply_text(
         shorteners_text(settings),
         reply_markup=shorteners_keyboard(),
-        parse_mode=enums.ParseMode.MARKDOWN,
+        parse_mode=enums.ParseMode.HTML,
     )
 
     await asyncio.sleep(SHORTENERS_VISIBLE_SECONDS)
@@ -445,11 +453,11 @@ async def view_shorteners(bot, message):
 @Client.on_callback_query(filters.regex(r"^swap_shorteners$"))
 async def swap_shorteners(client, callback):
     if callback.from_user.id != OWNER_ID:
-        return await callback.answer("Only the bot owner can switch shorteners.", show_alert=True)
+        return await callback.answer("⛔ Only the bot owner can switch shorteners", show_alert=True)
 
     chat = callback.message.chat
     if chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP) and not await is_group_connected(chat.id):
-        return await callback.answer("This group is disconnected.", show_alert=True)
+        return await callback.answer("⚠️ This group is disconnected", show_alert=True)
 
     settings = await get_settings(chat.id)
     old = (
@@ -470,14 +478,14 @@ async def swap_shorteners(client, callback):
                 await save_group_settings(chat.id, key, value)
             except Exception:
                 pass
-        return await callback.answer("Could not switch the shorteners. Please try again.", show_alert=True)
+        return await callback.answer("❌ Could not switch the shorteners. Please try again", show_alert=True)
 
     settings = await get_settings(chat.id)
     try:
         await callback.message.edit_text(
             shorteners_text(settings),
             reply_markup=shorteners_keyboard(),
-            parse_mode=enums.ParseMode.MARKDOWN,
+            parse_mode=enums.ParseMode.HTML,
         )
     except MessageNotModified:
         pass
@@ -486,14 +494,14 @@ async def swap_shorteners(client, callback):
 @Client.on_message(filters.command('logs') & filters.user(ADMINS))
 async def log_file(bot, message):
     try:
-        await message.reply_document('TelegramBot.log')
+        await message.reply_document('TelegramBot.log', caption="<b>📄 Error Logs</b>")
     except Exception as e:
-        await message.reply(str(e))
+        await message.reply(field("❌ Error", e))
 
 @Client.on_message(filters.command('clearindex') & filters.user(ADMINS))
 async def delete_all_index(bot, message):
     await message.reply_text(
-        'This will delete all indexed files.\nDo you want to continue??',
+        "<b>⚠️ Delete All Indexed Files?\n\nEvery file will be removed from the database and this cannot be undone</b>",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(text="🛃 Delete Files!", callback_data="clear_index")],
             [InlineKeyboardButton(text="💢 Cancel 💢", callback_data="close_data")],
@@ -504,16 +512,61 @@ async def delete_all_index(bot, message):
 @Client.on_callback_query(filters.regex(r'^clear_index$'))
 async def delete_all_index_confirm(bot, callback):
     if callback.from_user.id not in ADMINS:
-        return await callback.answer("Unauthorized!", show_alert=True)
+        return await callback.answer("⛔ Unauthorized", show_alert=True)
     await Media.collection.drop()
-    await callback.answer('Done')
-    await callback.message.edit('Successfully deleted all the indexed files.')
+    await callback.answer("✅ Done")
+    await callback.message.edit("<b>✅ All indexed files deleted</b>")
+
+FIXNAMES_STATE = {"running": False}
+FIXNAMES_TASKS = set()
+
+async def run_fixnames(bot, status, admin_id):
+    last_shown = 0
+
+    async def progress(scanned, changed):
+        nonlocal last_shown
+        if scanned - last_shown >= 20000:
+            last_shown = scanned
+            await edit_text_safely(
+                status,
+                "<b>⏳ Capitalising Indexed File Names...\n━━━━━━━━━━━━━━\n"
+                f"🗃 Checked: {scanned:,}\n"
+                f"✏️ Updated: {changed:,}</b>",
+            )
+
+    try:
+        scanned, changed = await prettify_stored_names(progress)
+        text = (
+            "<b>✅ File Names Updated\n━━━━━━━━━━━━━━\n"
+            f"🗃 Checked: {scanned:,}\n"
+            f"✏️ Updated: {changed:,}</b>"
+        )
+    except Exception:
+        logging.getLogger(__name__).exception("fixnames failed")
+        text = "<b>❌ Updating File Names Failed\n\nCheck</b> <code>/logs</code><b>, then run</b> <code>/fixnames</code> <b>again</b>"
+    finally:
+        FIXNAMES_STATE["running"] = False
+    await edit_text_safely(status, text)
+    try:
+        await bot.send_message(admin_id, text)
+    except Exception:
+        pass
+
+@Client.on_message(filters.command("fixnames") & filters.user(ADMINS) & connected_group)
+async def fix_names(bot, message):
+    if FIXNAMES_STATE["running"]:
+        return await message.reply("<b>⚠️ File names are already being updated</b>")
+    FIXNAMES_STATE["running"] = True
+    status = await message.reply("<b>⏳ Capitalising Indexed File Names...</b>")
+    task = asyncio.create_task(run_fixnames(bot, status, message.from_user.id))
+    FIXNAMES_TASKS.add(task)
+    task.add_done_callback(FIXNAMES_TASKS.discard)
 
 @Client.on_message(filters.command("restart") & filters.user(ADMINS))
 async def stop_button(bot, message):
     await bot.send_message(
         chat_id=message.chat.id,
-        text="**🔄 𝙱𝙾𝚃 𝙸𝚂 𝚁𝙴𝚂𝚃𝙰𝚁𝚃𝙸𝙽𝙶**",
+        text="<b>🔄 Bot Is Restarting...</b>",
     )
     await db.set_restart_flag()
     os.execl(sys.executable, sys.executable, *sys.argv)

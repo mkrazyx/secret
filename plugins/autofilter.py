@@ -11,7 +11,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from info import *
 from plugins.index import get_file_details, get_search_results
-from utils import db, get_settings, get_shortlink, get_size, is_group_connected, is_subscribed, pretty_name, search_gagala, temp
+from utils import db, get_settings, get_shortlink, get_size, is_group_connected, is_subscribed, search_gagala, temp
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)
@@ -95,6 +95,9 @@ async def get_result_buttons(chat_id, req_user_id, cache_id, offset, next_offset
 
     return [btn]
 
+def file_title(file):
+    return " ".join(word for word in (file.file_name or "").split() if not word.startswith(("www.", "@")))
+
 def build_results_caption(chat_id, search, files):
     cap = (
         f"<b>🔆 Results For ➔ ‛{escape(search)}’👇\n\n"
@@ -102,7 +105,7 @@ def build_results_caption(chat_id, search, files):
     )
 
     for file in files:
-        title = pretty_name(file.file_name or "")
+        title = file_title(file)
         cap += (
             f"🍿 <a href=\"https://telegram.me/{temp.U_NAME}"
             f"?start=files_{chat_id}_{file.file_id}\">"
@@ -354,7 +357,7 @@ async def advantage_spell_chok(client, msg):
     reqstr1 = msg.from_user.id if msg.from_user else None
     if not reqstr1: return
     try: reqstr = await client.get_users(reqstr1)
-    except: return await msg.reply("❌ Unable to fetch user.")
+    except: return await msg.reply("<b>❌ Unable to fetch user</b>")
 
     query = re.sub(r"\s+", " ", remove_words(mv_rqst)).strip() + "movie"
     g_s = await search_gagala(query) + await search_gagala(msg.text)
@@ -392,17 +395,17 @@ async def send_file_to_user(client, user_id, file_id):
     if not files:
         return False
     file = files[0]
-    title = " ".join(x for x in (file.file_name or "").split() if not x.startswith(("www.", "@")))
-    caption = title
+    title = file_title(file)
+    caption = escape(title)
     if CAPTION:
         try:
             caption = CAPTION.format(
-                file_name=title,
+                file_name=escape(title),
                 file_size=get_size(file.file_size),
                 file_caption="",
             )
         except Exception:
-            caption = title
+            caption = escape(title)
 
     await client.send_cached_media(
         chat_id=user_id,
@@ -419,7 +422,7 @@ async def send_shortlink_page(client, user_id, file_id, chat_id):
     if not files:
         return False
     file = files[0]
-    title = " ".join(x for x in (file.file_name or "").split() if not x.startswith(("www.", "@")))
+    title = file_title(file)
 
     try:
         short_url = await get_shortlink(
@@ -477,8 +480,8 @@ async def start(client, message):
     ban_status = await db.get_ban_status(message.from_user.id)
     if ban_status.get("is_banned"):
         return await message.reply_text(
-            f'Sorry Dude, You are Banned to use Me.\n'
-            f'Ban Reason: {ban_status.get("ban_reason", "No Reason")}'
+            "<b>🚫 You are banned from using this bot\n"
+            f'📝 Reason: {escape(str(ban_status.get("ban_reason", "No Reason")))}</b>'
         )
 
     if not await db.is_user_exist(message.from_user.id):
@@ -539,12 +542,12 @@ async def start(client, message):
 
         return await client.send_message(
             message.from_user.id,
-            "**🔆 First Join Our Main Channel & Click Try Again ♻**",
+            "<b>🔆 First Join Our Main Channel &amp; Click Try Again ♻</b>",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🏮 Main Channel ⟨Click Here⟩ 🏮", url=FORCE)],
                 [InlineKeyboardButton("🔄 Try Again", url=retry)],
             ]),
-            parse_mode=enums.ParseMode.MARKDOWN,
+            parse_mode=enums.ParseMode.HTML,
         )
 
     if data in {"subscribe", "error", "okay", "help"}:
@@ -581,18 +584,18 @@ async def start(client, message):
     if pre in {"short", "files"}:
         if not cache:
             return await message.reply_text(
-                "<b>Link Expired, Search Again in Group!</b>"
+                "<b>⌛ Link Expired, Search Again in Group!</b>"
             )
 
         chat_id = cache.get("chat_id")
         if chat_id is None:
             return await message.reply_text(
-                "<b>Link Expired, Search Again in Group!</b>"
+                "<b>⌛ Link Expired, Search Again in Group!</b>"
             )
 
         if pre == "short":
             if not await send_file_to_user(client, message.from_user.id, file_id):
-                await message.reply("No such file exist.")
+                await message.reply("<b>❌ No such file exists</b>")
             return
 
         settings = await get_settings(chat_id)
@@ -607,12 +610,12 @@ async def start(client, message):
 
             if result is None:
                 return await message.reply(
-                    "❌ Link generation failed. Please try again later."
+                    "<b>❌ Link generation failed. Please try again later</b>"
                 )
 
             if result is False:
                 return await message.reply(
-                    "No such file exist."
+                    "<b>❌ No such file exists</b>"
                 )
 
             return
@@ -622,6 +625,6 @@ async def start(client, message):
             message.from_user.id,
             file_id
         ):
-            await message.reply("No such file exist.")
+            await message.reply("<b>❌ No such file exists</b>")
 
         return
