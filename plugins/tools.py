@@ -10,7 +10,7 @@ from pyrogram.errors import FloodWait, MessageNotModified, MessageTooLong, PeerI
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from info import *
 from utils import broadcast_messages, connected_group, db, field, get_settings, is_group_connected, save_group_settings, user_link
-
+from plugins.index import Media, count_bad_files, delete_bad_files, normalize, unpack_new_file_id
 BROADCAST_CANCEL = set()
 
 def get_settings_keyboard(settings: dict):
