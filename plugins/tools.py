@@ -5,13 +5,10 @@ import re
 import secrets
 import sys
 from html import escape
-
 from pyrogram import Client, enums, filters
 from pyrogram.errors import FloodWait, MessageNotModified, MessageTooLong, PeerIdInvalid
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
 from info import *
-from plugins.index import Media, count_bad_files, delete_bad_files, normalize, prettify_stored_names, unpack_new_file_id
 from utils import broadcast_messages, connected_group, db, field, get_settings, is_group_connected, save_group_settings, user_link
 
 BROADCAST_CANCEL = set()
@@ -516,51 +513,6 @@ async def delete_all_index_confirm(bot, callback):
     await Media.collection.drop()
     await callback.answer("✅ Done")
     await callback.message.edit("<b>✅ All indexed files deleted</b>")
-
-FIXNAMES_STATE = {"running": False}
-FIXNAMES_TASKS = set()
-
-async def run_fixnames(bot, status, admin_id):
-    last_shown = 0
-
-    async def progress(scanned, changed):
-        nonlocal last_shown
-        if scanned - last_shown >= 20000:
-            last_shown = scanned
-            await edit_text_safely(
-                status,
-                "<b>⏳ Capitalising Indexed File Names...\n━━━━━━━━━━━━━━\n"
-                f"🗃 Checked: {scanned:,}\n"
-                f"✏️ Updated: {changed:,}</b>",
-            )
-
-    try:
-        scanned, changed = await prettify_stored_names(progress)
-        text = (
-            "<b>✅ File Names Updated\n━━━━━━━━━━━━━━\n"
-            f"🗃 Checked: {scanned:,}\n"
-            f"✏️ Updated: {changed:,}</b>"
-        )
-    except Exception:
-        logging.getLogger(__name__).exception("fixnames failed")
-        text = "<b>❌ Updating File Names Failed\n\nCheck</b> <code>/logs</code><b>, then run</b> <code>/fixnames</code> <b>again</b>"
-    finally:
-        FIXNAMES_STATE["running"] = False
-    await edit_text_safely(status, text)
-    try:
-        await bot.send_message(admin_id, text)
-    except Exception:
-        pass
-
-@Client.on_message(filters.command("fixnames") & filters.user(ADMINS) & connected_group)
-async def fix_names(bot, message):
-    if FIXNAMES_STATE["running"]:
-        return await message.reply("<b>⚠️ File names are already being updated</b>")
-    FIXNAMES_STATE["running"] = True
-    status = await message.reply("<b>⏳ Capitalising Indexed File Names...</b>")
-    task = asyncio.create_task(run_fixnames(bot, status, message.from_user.id))
-    FIXNAMES_TASKS.add(task)
-    task.add_done_callback(FIXNAMES_TASKS.discard)
 
 @Client.on_message(filters.command("restart") & filters.user(ADMINS))
 async def stop_button(bot, message):
