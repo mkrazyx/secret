@@ -4,17 +4,14 @@ import logging
 import re
 from html import escape
 from struct import pack
-
 from marshmallow.exceptions import ValidationError
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import UpdateOne
 from pymongo.errors import DuplicateKeyError
 from pyrogram import Client, enums, filters
 from pyrogram.errors import ChannelInvalid, ChannelPrivate, FloodWait, PeerIdInvalid, UsernameInvalid, UsernameNotModified
 from pyrogram.file_id import FileId
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from umongo import Document, Instance, fields
-
 from info import *
 from utils import connected_group, extract_v2, field, pretty_name, temp
 
@@ -205,29 +202,6 @@ async def get_search_results(
         next_offset = ""
 
     return files, next_offset, total_results
-
-async def prettify_stored_names(progress=None, batch_size=1000):
-    scanned = changed = 0
-    last_id = None
-    while True:
-        mongo_filter = {} if last_id is None else {"_id": {"$gt": last_id}}
-        docs = await Media.collection.find(mongo_filter, {"file_name": 1}).sort("_id", 1).limit(batch_size).to_list(length=batch_size)
-        if not docs:
-            return scanned, changed
-        updates = []
-        for doc in docs:
-            old = doc.get("file_name") or ""
-            new = await index_name(old)
-            if new and new != old:
-                updates.append(UpdateOne({"_id": doc["_id"]}, {"$set": {"file_name": new}}))
-        if updates:
-            await Media.collection.bulk_write(updates, ordered=False)
-        scanned += len(docs)
-        changed += len(updates)
-        last_id = docs[-1]["_id"]
-        if progress:
-            await progress(scanned, changed)
-        await asyncio.sleep(0)
 
 def bad_files_filter(query):
     words = normalize(query)
