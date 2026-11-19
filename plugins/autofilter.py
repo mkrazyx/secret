@@ -4,11 +4,9 @@ import math
 import re
 import time as _time
 from html import escape
-
 from pyrogram import Client, enums, filters
 from pyrogram.errors import MessageNotModified
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
 from info import *
 from plugins.index import get_file_details, get_search_results
 from utils import db, get_settings, get_shortlink, get_size, is_group_connected, is_subscribed, search_gagala, temp
@@ -496,6 +494,7 @@ async def start(client, message):
                 LOG_CHANNEL,
                 f'#NewUser\nID - <code>{user.id}</code>\nNᴀᴍᴇ - <a href="{profile}">{escape(user.first_name or "User")}</a>',
                 parse_mode=enums.ParseMode.HTML,
+                disable_web_page_preview=True,
             )
         except Exception:
             pass
