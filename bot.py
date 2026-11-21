@@ -7,8 +7,8 @@ from pyrogram import Client, __version__
 from pyrogram.raw.all import layer
 
 from info import *
-from plugins.index import Media, check_pending_index_on_startup
-from utils import close_http_session, db, temp
+from plugins.index import check_pending_index_on_startup
+from utils import close_http_session, db, delete_later, temp
 
 console = logging.StreamHandler(sys.stdout)
 console.setLevel(logging.INFO)
@@ -23,13 +23,6 @@ logging.getLogger("pyrogram").setLevel(logging.ERROR)
 
 async def health(request):
     return web.json_response("BenFilterBot")
-
-async def delete_later(message, seconds):
-    await asyncio.sleep(seconds)
-    try:
-        await message.delete()
-    except Exception:
-        pass
 
 class Bot(Client):
 
@@ -46,14 +39,9 @@ class Bot(Client):
 
     async def start(self):
         await db.ensure_cache_indexes()
-        temp.BANNED_USERS = await db.get_banned_users()
         await super().start()
-        await Media.ensure_indexes()
         me = await self.get_me()
-        temp.ME = me.id
         temp.U_NAME = me.username
-        temp.B_NAME = me.first_name
-        self.username = '@' + me.username
         logging.info(f"{me.first_name} with for Pyrogram v{__version__} (Layer {layer}) started on {me.username}.")
         logging.info(LOGO)
 

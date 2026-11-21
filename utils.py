@@ -5,7 +5,6 @@ import re
 import urllib.parse
 from datetime import datetime, timedelta
 from html import escape
-from typing import List, Union
 
 import aiohttp
 import motor.motor_asyncio
@@ -13,7 +12,6 @@ import regex
 from bs4 import BeautifulSoup
 from pyrogram import enums, filters
 from pyrogram.errors import FloodWait, InputUserDeactivated, PeerIdInvalid, UserIsBlocked, UserNotParticipant
-from pyrogram.types import Message
 from rapidfuzz import fuzz
 from shortzy import Shortzy
 
@@ -72,10 +70,6 @@ class Database:
 
     async def delete_user(self, user_id):
         await self.col.delete_many({"id": int(user_id)})
-
-    async def get_banned_users(self):
-        cursor = self.col.find({"ban_status.is_banned": True}, {"id": 1})
-        return [user["id"] async for user in cursor]
 
     async def connect_group(self, chat_id, title):
         await self.grp.update_one(
@@ -173,16 +167,6 @@ class Database:
 
 db = Database(DATABASE_URI, DATABASE_NAME)
 
-BTN_URL_REGEX = re.compile(
-    r"(\[([^\[]+?)\]\((buttonurl|buttonalert):(?:/{0,2})(.+?)(:same)?\))"
-)
-
-BANNED = {}
-SECOND_SHORTENER = {}
-SMART_OPEN = '“'
-SMART_CLOSE = '”'
-START_CHAR = ('\'', '"', SMART_OPEN)
-SHORT = {}
 HTTP_SESSION = None
 
 async def get_http_session():
@@ -198,15 +182,21 @@ async def close_http_session():
         HTTP_SESSION = None
 
 class temp(object):
-    BANNED_USERS = []
-    ME = None
-    CURRENT=int(os.environ.get("SKIP", 2))
-    CANCEL = False
-    MELCOW = {}
     U_NAME = None
-    B_NAME = None
+    CURRENT = int(os.environ.get("SKIP", 2))
+    CANCEL = False
+    SAVED = 0
+    DUP = 0
+    DEL = 0
     GROUP_ACCESS = {}
     SETTINGS = {}
+
+async def delete_later(message, seconds=600):
+    await asyncio.sleep(seconds)
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 async def is_subscribed(bot, query):
     try:
@@ -222,35 +212,30 @@ async def is_subscribed(bot, query):
     return False
 
 async def broadcast_messages(user_id, message):
-    user_id = int(user_id)
+    """Copy `message` to `user_id`. Returns (sent, reason).
 
-    while True:
+    reason is one of: Success, Blocked, Deleted, Invalid, Error.
+    """
+    for _ in range(3):
         try:
             await message.copy(chat_id=user_id)
             return True, "Success"
-
         except FloodWait as e:
-            wait = max(1, int(e.value))
-            logger.warning("Broadcast FloodWait: waiting %s seconds", wait)
-            await asyncio.sleep(wait + 1)
-
+            await asyncio.sleep(e.value + 1)
         except InputUserDeactivated:
-            await db.delete_user(user_id)
-            logger.info("%s removed: deleted account", user_id)
+            await db.delete_user(int(user_id))
+            logger.info("%s removed from database, account deleted.", user_id)
             return False, "Deleted"
-
         except UserIsBlocked:
-            logger.info("%s blocked the bot", user_id)
             return False, "Blocked"
-
         except PeerIdInvalid:
-            await db.delete_user(user_id)
-            logger.info("%s removed: invalid peer", user_id)
-            return False, "Invalid Peer"
-
+            # Not a reason to delete the user: after a redeploy the session has
+            # no cached peers, so valid users raise this too.
+            return False, "Invalid"
         except Exception:
-            logger.exception("Broadcast failed for user %s", user_id)
+            logger.exception("Broadcast to %s failed", user_id)
             return False, "Error"
+    return False, "Error"
 
 async def search_gagala(text):
 
@@ -394,14 +379,6 @@ async def is_group_connected(chat_id):
     temp.GROUP_ACCESS[chat_id] = connected
     return connected
 
-async def set_group_connected(chat_id, connected):
-    chat_id = int(chat_id)
-    if connected:
-        await db.connect_group(chat_id, "")
-    else:
-        await db.disconnect_group(chat_id)
-    temp.GROUP_ACCESS[chat_id] = connected
-
 async def connected_group_filter(_, __, update):
     chat = getattr(update, "chat", None)
     if chat is None and getattr(update, "message", None):
@@ -419,7 +396,7 @@ def get_size(size):
     units = ["Bytes", "KB", "MB", "GB", "TB", "PB", "EB"]
     size = float(size)
     i = 0
-    while size >= 1024.0 and i < len(units):
+    while size >= 1024.0 and i < len(units) - 1:
         i += 1
         size /= 1024.0
     return "%.2f %s" % (size, units[i])
@@ -429,10 +406,6 @@ def user_link(user_id, name):
 
 def field(label, value):
     return f"<b>{label}:</b> <code>{escape(str(value))}</code>"
-
-def split_list(l, n):
-    for i in range(0, len(l), n):
-        yield l[i:i + n]
 
 _WORD_RE = re.compile(r"(?<![\w'])[^\W\d_][\w']*")
 _EPISODE_RE = re.compile(r"s\d{1,2}(?:e\d{1,3})?", re.I)
@@ -458,113 +431,6 @@ def pretty_name(name):
         if not lone_title:
             text = f"{text[:last.start()]}({last.group(1)}){text[last.end():]}"
     return text
-
-def get_file_id(msg: Message):
-    if msg.media:
-        for message_type in (
-            "photo",
-            "animation",
-            "audio",
-            "document",
-            "video",
-            "video_note",
-            "voice",
-            "sticker"
-        ):
-            obj = getattr(msg, message_type)
-            if obj:
-                setattr(obj, "message_type", message_type)
-                return obj
-
-def extract_user(message: Message) -> Union[int, str]:
-    user_id = None
-    user_first_name = None
-    if message.reply_to_message:
-        user_id = message.reply_to_message.from_user.id
-        user_first_name = message.reply_to_message.from_user.first_name
-
-    elif len(message.command) > 1:
-        if (
-            len(message.entities) > 1 and
-            message.entities[1].type == enums.MessageEntityType.TEXT_MENTION
-        ):
-
-            required_entity = message.entities[1]
-            user_id = required_entity.user.id
-            user_first_name = required_entity.user.first_name
-        else:
-            user_id = message.command[1]
-            user_first_name = user_id
-        try:
-            user_id = int(user_id)
-        except ValueError:
-            pass
-    else:
-        user_id = message.from_user.id
-        user_first_name = message.from_user.first_name
-    return (user_id, user_first_name)
-
-def last_online(from_user):
-    time = ""
-    if from_user.is_bot:
-        time += "🤖 Bot :("
-    elif from_user.status == enums.UserStatus.RECENTLY:
-        time += "Recently"
-    elif from_user.status == enums.UserStatus.LAST_WEEK:
-        time += "Within the last week"
-    elif from_user.status == enums.UserStatus.LAST_MONTH:
-        time += "Within the last month"
-    elif from_user.status == enums.UserStatus.LONG_AGO:
-        time += "A long time ago :("
-    elif from_user.status == enums.UserStatus.ONLINE:
-        time += "Currently Online"
-    elif from_user.status == enums.UserStatus.OFFLINE:
-        time += from_user.last_online_date.strftime("%a, %d %b %Y, %H:%M:%S")
-    return time
-
-def split_quotes(text: str) -> List:
-    if not any(text.startswith(char) for char in START_CHAR):
-        return text.split(None, 1)
-    counter = 1
-    while counter < len(text):
-        if text[counter] == "\\":
-            counter += 1
-        elif text[counter] == text[0] or (text[0] == SMART_OPEN and text[counter] == SMART_CLOSE):
-            break
-        counter += 1
-    else:
-        return text.split(None, 1)
-
-    key = remove_escapes(text[1:counter].strip())
-
-    rest = text[counter + 1:].strip()
-    if not key:
-        key = text[0] + text[0]
-    return list(filter(None, [key, rest]))
-
-def remove_escapes(text: str) -> str:
-    res = ""
-    is_escaped = False
-    for counter in range(len(text)):
-        if is_escaped:
-            res += text[counter]
-            is_escaped = False
-        elif text[counter] == "\\":
-            is_escaped = True
-        else:
-            res += text[counter]
-    return res
-
-def humanbytes(size):
-    if not size:
-        return ""
-    power = 2**10
-    n = 0
-    Dic_powerN = {0: ' ', 1: 'Ki', 2: 'Mi', 3: 'Gi', 4: 'Ti'}
-    while size > power:
-        size /= power
-        n += 1
-    return str(round(size, 2)) + " " + Dic_powerN[n] + 'B'
 
 async def get_shortlink(chat_id, link, client=None):
     settings = await get_settings(chat_id)
