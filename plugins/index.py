@@ -15,6 +15,8 @@ from umongo import Document, Instance, fields
 from info import *
 from utils import connected_group, extract_v2, field, pretty_name, temp
 
+PAGE_SIZE = 10
+
 client = AsyncIOMotorClient(DATABASE_URI)
 mongo_db = client[DATABASE_NAME]
 instance = Instance.from_db(mongo_db)
@@ -30,7 +32,6 @@ def normalize(text: str) -> list:
 def normalize_basic_episode(text: str) -> str:
     text = text.casefold()
     text = re.sub(r'\bs(\d{2})\s*e(\d{2})\b', r's\1e\2', text)
-    text = re.sub(r'\bs(\d{2})\s*ep(\d{2})\b', r's\1e\2', text)
     text = re.sub(r'\bs(\d{2})\s*ep\s*(\d{2})\b', r's\1e\2', text)
     return text
 
@@ -49,7 +50,6 @@ async def index_name(text: str) -> str:
 @instance.register
 class Media(Document):
     file_id = fields.StrField(attribute="_id")
-    file_ref = fields.StrField(allow_none=True)
     file_name = fields.StrField(required=True)
     file_size = fields.IntField(required=True)
     file_type = fields.StrField(allow_none=True)
@@ -57,11 +57,10 @@ class Media(Document):
 
     class Meta:
         collection_name = COLLECTION_NAME
-        indexes = ["$file_name"]
         strict = False
 
 async def save_file(media):
-    file_id, file_ref = unpack_new_file_id(media.file_id)
+    file_id, _ = unpack_new_file_id(media.file_id)
 
     original_name = str(media.file_name or "")
     source_text = original_name
@@ -78,7 +77,6 @@ async def save_file(media):
     try:
         file = Media(
             file_id=file_id,
-            file_ref=file_ref,
             file_name=normalized_name,
             file_size=media.file_size,
             file_type=media.file_type,
@@ -104,15 +102,8 @@ async def save_file(media):
     logger.info("%s indexed", original_name)
     return True, 1
 
-async def get_search_results(
-    chat_id,
-    query,
-    file_type=None,
-    max_results=10,
-    offset=0,
-    **kwargs,
-):
-    max_results = 10
+async def get_search_results(query, offset=0):
+    max_results = PAGE_SIZE
 
     try:
         offset = int(offset)
@@ -126,10 +117,6 @@ async def get_search_results(
     if not words:
         return [], "", 0
 
-    base_filter = {}
-    if file_type:
-        base_filter["file_type"] = file_type
-
     strict_conditions = [
         {
             "file_name": {
@@ -139,7 +126,7 @@ async def get_search_results(
         }
         for word in words
     ]
-    strict_filter = {**base_filter, "$and": strict_conditions}
+    strict_filter = {"$and": strict_conditions}
 
     fuzzy_conditions = [
         {
@@ -151,7 +138,6 @@ async def get_search_results(
         for word in words
     ]
     fuzzy_filter = {
-        **base_filter,
         "$and": fuzzy_conditions,
         "$nor": [{"$and": strict_conditions}],
     }
@@ -255,9 +241,7 @@ def unpack_new_file_id(new_file_id):
 
 media_filter = filters.document | filters.video
 
-index_channels = list(dict.fromkeys([*CHANNELS, CAPTION_INDEX_CHANNEL]))
-
-@Client.on_message(filters.chat(index_channels) & media_filter)
+@Client.on_message(filters.chat(CHANNELS) & media_filter)
 async def media(bot, message):
     for file_type in ("document", "video"):
         media = getattr(message, file_type, None)
@@ -346,26 +330,19 @@ async def index_files(bot, query):
         return await query.answer("🚫 Cancelling Indexing...")
 
     if query.data == 'index_status':
-        current_progress = getattr(temp, 'CURRENT', 0)
-        total_saved = getattr(temp, 'SAVED', 0)
-        total_dup = getattr(temp, 'DUP', 0)
-        total_del = getattr(temp, 'DEL', 0)
         return await query.answer(
             "📊 Live Index Status\n━━━━━━━━━━━━━━\n"
-            f"📥 Processed: {current_progress:,}\n"
-            f"🗃 Saved: {total_saved:,}\n"
-            f"♻️ Duplicates: {total_dup:,}\n"
-            f"🗑 Deleted: {total_del:,}",
+            f"📥 Processed: {temp.CURRENT:,}\n"
+            f"🗃 Saved: {temp.SAVED:,}\n"
+            f"♻️ Duplicates: {temp.DUP:,}\n"
+            f"🗑 Deleted: {temp.DEL:,}",
             show_alert=True
         )
 
     try:
-        _, raju, chat, lst_msg_id = query.data.split("#")
+        _, _, chat, lst_msg_id = query.data.split("#")
     except (ValueError, AttributeError):
         return await query.answer("❌ Invalid index request", show_alert=True)
-    if raju == 'reject':
-        await query.message.delete()
-        return
     if lock.locked():
         return await query.answer("⏳ Wait until the previous index is finished", show_alert=True)
     msg = query.message
@@ -496,8 +473,6 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, res
 
     if resume_current is not None:
         temp.CURRENT = resume_current
-    elif not hasattr(temp, 'CURRENT'):
-        temp.CURRENT = 0
 
     cancelled = False
     chat_info = None
@@ -538,7 +513,7 @@ async def index_files_to_db(lst_msg_id, chat, msg, bot, resume_current=None, res
                 if current % 50 == 0:
                     await save_index_state(chat, lst_msg_id, current, total_files, duplicate, deleted, access_hash)
 
-                if (current >= 10 and last_edit == temp.CURRENT) or (current - last_edit >= 2000):
+                if current - last_edit >= 2000:
                     last_edit = current
                     await save_index_state(chat, lst_msg_id, current, total_files, duplicate, deleted, access_hash)
                     try:

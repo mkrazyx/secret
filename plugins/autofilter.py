@@ -4,12 +4,14 @@ import math
 import re
 import time as _time
 from html import escape
+
 from pyrogram import Client, enums, filters
 from pyrogram.errors import MessageNotModified
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 from info import *
-from plugins.index import get_file_details, get_search_results
-from utils import db, get_settings, get_shortlink, get_size, is_group_connected, is_subscribed, search_gagala, temp
+from plugins.index import PAGE_SIZE, get_file_details, get_search_results
+from utils import db, delete_later, get_settings, get_shortlink, get_size, is_group_connected, is_subscribed, search_gagala, temp
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)
@@ -28,9 +30,9 @@ TUTORIAL_BUTTON = InlineKeyboardButton(
 EXPIRED = '♻ Link Expired, Please Request in Group Again!'
 ALRT_TXT = '🔒 This option belongs to another user. '
 REMOVES = [
-    "in", "series", "4k", "kdrama", "ott", 
-    "movies", "webseries", "language", "hd", "hollywood", 
-    "and", "&", "bollywood", "dub", "anime",
+    "in", "series", "4k", "kdrama", "ott",
+    "movies", "webseries", "language", "hd", "hollywood",
+    "and", "bollywood", "dub", "anime",
     "dubbed", "file", "download", "movie", "film",
     "netflix", "link", "subtitles", "dubbing",
     "full movie", "korean drama", "web series", "k drama",
@@ -51,10 +53,9 @@ def is_spam(uid, cooldown=2):
     USER_COOLDOWN[uid] = now
     return False
 
-async def get_result_buttons(chat_id, req_user_id, cache_id, offset, next_offset, total_results):
-    max_results = 10
-    current_page = (offset // max_results) + 1
-    total_pages = max(1, math.ceil(total_results / max_results))
+async def get_result_buttons(chat_id, req_user_id, cache_id, offset, total_results):
+    current_page = (offset // PAGE_SIZE) + 1
+    total_pages = max(1, math.ceil(total_results / PAGE_SIZE))
 
     btn = []
 
@@ -62,7 +63,7 @@ async def get_result_buttons(chat_id, req_user_id, cache_id, offset, next_offset
         btn.append(
             InlineKeyboardButton(
                 "⏪ Back",
-                callback_data=f"next_{cache_id}_{offset - max_results}_{req_user_id}"
+                callback_data=f"next_{cache_id}_{offset - PAGE_SIZE}_{req_user_id}"
             )
         )
 
@@ -73,11 +74,11 @@ async def get_result_buttons(chat_id, req_user_id, cache_id, offset, next_offset
         )
     )
 
-    if offset + max_results < total_results:
+    if offset + PAGE_SIZE < total_results:
         btn.append(
             InlineKeyboardButton(
                 "Next ⏩",
-                callback_data=f"next_{cache_id}_{offset + max_results}_{req_user_id}"
+                callback_data=f"next_{cache_id}_{offset + PAGE_SIZE}_{req_user_id}"
             )
         )
 
@@ -121,22 +122,12 @@ async def store_file_links(chat_id, files):
             ttl=660,
         )
 
-async def store_pagination(key, chat_id, search, user_id):
+async def store_pagination(key, search):
     await db.set_cache(
         f"pagination:{key}",
-        {
-            "chat_id": chat_id,
-            "search": search,
-        },
+        {"search": search},
         ttl=660,
     )
-
-async def handle_auto_delete(message_obj):
-    try:
-        await asyncio.sleep(600)
-        await message_obj.delete()
-    except Exception:
-        pass
 
 @Client.on_message(
     filters.group
@@ -185,14 +176,12 @@ async def next_page(bot, query):
         if not search:
             return await query.answer(EXPIRED, show_alert=True)
 
-        files, next_offset, total = await get_search_results(
-            query.message.chat.id, search, offset=offset
-        )
+        files, _, total = await get_search_results(search, offset=offset)
         if not files:
             return await query.answer(EXPIRED, show_alert=True)
 
         buttons = await get_result_buttons(
-            query.message.chat.id, req, key, offset, next_offset, total
+            query.message.chat.id, req, key, offset, total
         )
         await store_file_links(query.message.chat.id, files)
         cap = build_results_caption(query.message.chat.id, search, files)
@@ -216,7 +205,7 @@ async def advantage_spoll_choker(bot, query):
         return await query.answer(ALRT_TXT, show_alert=True)
     if query.message.chat.type not in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
         return await query.answer(ALRT_TXT, show_alert=True)
-    if not await db.is_group_connected(query.message.chat.id):
+    if not await is_group_connected(query.message.chat.id):
         return await query.answer("This group is not connected.", show_alert=True)
     if is_spam(query.from_user.id):
         return
@@ -249,9 +238,7 @@ async def advantage_spoll_choker(bot, query):
         except:
             return await query.answer("❗Invalid Option", show_alert=True)
 
-        files, offset, total_results = await get_search_results(
-            query.message.chat.id, movie, offset=0
-        )
+        files, offset, total_results = await get_search_results(movie, offset=0)
         if files:
             await auto_filter(bot, query, (movie, files, offset, total_results))
         else:
@@ -277,8 +264,7 @@ async def auto_filter(client, msg, spoll=False):
     if not spoll:
         message = msg
         if (
-            message.text.startswith("/")
-            or re.findall(r"((^/|^,|^!|^\.|^[\U0001F900-\U000E007F]).*)", message.text)
+            re.match(r"[,!.\U0001F900-\U000E007F]", message.text)
             or len(message.text) >= 100
         ):
             return
@@ -314,9 +300,7 @@ async def auto_filter(client, msg, spoll=False):
             await k.delete()
             return
 
-        files, offset, total_results = await get_search_results(
-            message.chat.id, search, offset=0
-        )
+        files, _, total_results = await get_search_results(search, offset=0)
         if not files:
             settings = await get_settings(message.chat.id)
             if settings.get("spell_check", False):
@@ -326,7 +310,7 @@ async def auto_filter(client, msg, spoll=False):
         message = msg.message.reply_to_message
         if not message:
             return await msg.answer(EXPIRED, show_alert=True)
-        search, files, offset, total_results = spoll
+        search, files, _, total_results = spoll
         try:
             await msg.message.delete()
         except Exception:
@@ -334,9 +318,9 @@ async def auto_filter(client, msg, spoll=False):
 
     key = f"{message.chat.id}-{message.id}"
     req = message.from_user.id if message.from_user else 0
-    await store_pagination(key, message.chat.id, search, req)
+    await store_pagination(key, search)
     buttons = await get_result_buttons(
-        message.chat.id, req, key, 0, offset, total_results
+        message.chat.id, req, key, 0, total_results
     )
     await store_file_links(message.chat.id, files)
     cap = build_results_caption(message.chat.id, search, files)
@@ -347,42 +331,41 @@ async def auto_filter(client, msg, spoll=False):
         disable_web_page_preview=True,
         parse_mode=enums.ParseMode.HTML,
     )
-    asyncio.create_task(handle_auto_delete(result))
-    asyncio.create_task(handle_auto_delete(message))
+    asyncio.create_task(delete_later(result))
+    asyncio.create_task(delete_later(message))
+
+JUNK_RE = re.compile(
+    r"\b(imdb|wikipedia|reviews|full|all|episodes?|film|movie|tv\s*series|television\s*series|web\s*series|tv\s*show|show|series)\b",
+    re.IGNORECASE,
+)
+WATCH_RE = re.compile(r"watch\s+([a-zA-Z0-9_\s\-\(\)]+)", re.IGNORECASE)
+
+def tidy_title(text):
+    return " ".join(re.sub(r"[()_\-]", " ", text).split())
 
 async def advantage_spell_chok(client, msg):
-    mv_rqst = msg.text
-    reqstr1 = msg.from_user.id if msg.from_user else None
-    if not reqstr1: return
-    try: reqstr = await client.get_users(reqstr1)
-    except: return await msg.reply("<b>❌ Unable to fetch user</b>")
+    if not msg.from_user:
+        return
+    user_id = msg.from_user.id
 
-    query = re.sub(r"\s+", " ", remove_words(mv_rqst)).strip() + "movie"
-    g_s = await search_gagala(query) + await search_gagala(msg.text)
+    query = remove_words(msg.text) + " movie"
+    first, second = await asyncio.gather(search_gagala(query), search_gagala(msg.text))
+    g_s = first + second
 
-    if not g_s:
-        k = await msg.reply(NO_RESULTS, disable_web_page_preview=True)
-        await asyncio.sleep(60)
-        return await k.delete()
+    names = [tidy_title(JUNK_RE.sub(" ", t)) for t in g_s if re.search(r"imdb|wikipedia", t, re.IGNORECASE)]
+    names = [n for n in names if n]
+    if not names:
+        names = [tidy_title(m.group(1)) for t in g_s if (m := WATCH_RE.search(t))]
+    movielist = list(dict.fromkeys(filter(None, names)))[:3]
 
-    gs = list(filter(re.compile(r".*(imdb|wikipedia).*", re.IGNORECASE).search, g_s))
-    gs_parsed = list(dict.fromkeys(filter(None, [re.sub(r'\b(imdb|wikipedia|reviews|full|all|episode(s)?|film|movie|tv\s*series|television\s*series|web\s*series|tv\s*show|show|series)\b|[\(\)\-]', ' ', i, flags=re.IGNORECASE).strip() for i in gs])))
-
-    if not gs_parsed:
-        for mv in g_s:
-            match = re.compile(r"watch\s+([a-zA-Z0-9_\s\-\(\)]+)", re.IGNORECASE).search(mv)
-            if match: gs_parsed.append(match.group(1).strip())
-    gs_parsed = list(dict.fromkeys(filter(None, gs_parsed)))[:3]
-
-    movielist = list(dict.fromkeys(filter(None, [re.sub(r'(\-|\(|\)|_)', '', i, flags=re.IGNORECASE).strip() for i in gs_parsed])))
     if not movielist:
         k = await msg.reply(NO_RESULTS, disable_web_page_preview=True)
         await asyncio.sleep(60)
         return await k.delete()
 
     SPELL_CHECK[msg.id] = movielist
-    btn = [[InlineKeyboardButton(text=movie, callback_data=f"spolling#{reqstr1}#{idx}")] for idx, movie in enumerate(movielist)]
-    btn.append([InlineKeyboardButton("×××× ⟨ Close ⟩ ××××", callback_data=f"spolling#{reqstr1}#close")])
+    btn = [[InlineKeyboardButton(text=movie, callback_data=f"spolling#{user_id}#{idx}")] for idx, movie in enumerate(movielist)]
+    btn.append([InlineKeyboardButton("×××× ⟨ Close ⟩ ××××", callback_data=f"spolling#{user_id}#close")])
     k = await msg.reply("<b>🎬 Select Your Pick ↡</b>", reply_markup=InlineKeyboardMarkup(btn))
     await asyncio.sleep(60)
     await k.delete()
@@ -394,16 +377,7 @@ async def send_file_to_user(client, user_id, file_id):
         return False
     file = files[0]
     title = file_title(file)
-    caption = escape(title)
-    if CAPTION:
-        try:
-            caption = CAPTION.format(
-                file_name=escape(title),
-                file_size=get_size(file.file_size),
-                file_caption="",
-            )
-        except Exception:
-            caption = escape(title)
+    caption = CAPTION.format(file_name=escape(title))
 
     await client.send_cached_media(
         chat_id=user_id,
@@ -444,13 +418,6 @@ async def send_shortlink_page(client, user_id, file_id, chat_id):
     asyncio.create_task(delete_later(msg))
     return True
 
-async def delete_later(message, seconds=600):
-    await asyncio.sleep(seconds)
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
 @Client.on_message(filters.command("start") & filters.incoming)
 async def start(client, message):
 
@@ -463,11 +430,7 @@ async def start(client, message):
         ]]
 
         return await message.reply(
-            START_TXT.format(
-                message.from_user.mention if message.from_user else message.chat.title,
-                temp.U_NAME,
-                temp.B_NAME,
-            ),
+            START_TXT,
             reply_markup=InlineKeyboardMarkup(buttons),
             disable_web_page_preview=True,
         )
@@ -525,11 +488,7 @@ async def start(client, message):
     if len(message.command) != 2:
         return await message.reply_photo(
             photo=PICS,
-            caption=START_TXT.format(
-                message.from_user.mention,
-                temp.U_NAME,
-                temp.B_NAME
-            ),
+            caption=START_TXT,
             reply_markup=InlineKeyboardMarkup(start_buttons),
             parse_mode=enums.ParseMode.HTML,
         )
@@ -552,78 +511,53 @@ async def start(client, message):
     if data in {"subscribe", "error", "okay", "help"}:
         return await message.reply_photo(
             photo=PICS,
-            caption=START_TXT.format(
-                message.from_user.mention,
-                temp.U_NAME,
-                temp.B_NAME
-            ),
+            caption=START_TXT,
             reply_markup=InlineKeyboardMarkup(start_buttons),
             parse_mode=enums.ParseMode.HTML,
         )
 
-    if data.startswith(("files_", "short_")):
-        parts = data.split("_", 2)
-        if len(parts) == 3:
-            pre, payload_chat_id, file_id = parts
-            cache = await db.get_cache(f"file:{payload_chat_id}:{file_id}")
-        else:
-            pre, file_id = data.split("_", 1)
-            cache = await db.get_cache(f"file:{file_id}")
-    elif "_" in data:
-        pre, payload = data.split("_", 1)
-        file_id = payload
-        cache = await db.get_cache(f"file:{file_id}")
-    else:
-        pre, file_id = "file", data
-        cache = None
+    parts = data.split("_", 2)
+    if len(parts) != 3 or parts[0] not in {"files", "short"}:
+        return
+    pre, payload_chat_id, file_id = parts
 
-    if pre not in {"file", "files", "short"}:
+    cache = await db.get_cache(f"file:{payload_chat_id}:{file_id}")
+    chat_id = cache.get("chat_id") if cache else None
+    if chat_id is None:
+        return await message.reply_text(
+            "<b>⌛ Link Expired, Search Again in Group!</b>"
+        )
+
+    if pre == "short":
+        if not await send_file_to_user(client, message.from_user.id, file_id):
+            await message.reply("<b>❌ No such file exists</b>")
         return
 
-    if pre in {"short", "files"}:
-        if not cache:
-            return await message.reply_text(
-                "<b>⌛ Link Expired, Search Again in Group!</b>"
-            )
+    settings = await get_settings(chat_id)
 
-        chat_id = cache.get("chat_id")
-        if chat_id is None:
-            return await message.reply_text(
-                "<b>⌛ Link Expired, Search Again in Group!</b>"
-            )
-
-        if pre == "short":
-            if not await send_file_to_user(client, message.from_user.id, file_id):
-                await message.reply("<b>❌ No such file exists</b>")
-            return
-
-        settings = await get_settings(chat_id)
-
-        if settings.get("is_shortlink", IS_SHORTLINK):
-            result = await send_shortlink_page(
-                client,
-                message.from_user.id,
-                file_id,
-                chat_id
-            )
-
-            if result is None:
-                return await message.reply(
-                    "<b>❌ Link generation failed. Please try again later</b>"
-                )
-
-            if result is False:
-                return await message.reply(
-                    "<b>❌ No such file exists</b>"
-                )
-
-            return
-
-        if not await send_file_to_user(
+    if settings.get("is_shortlink", IS_SHORTLINK):
+        result = await send_shortlink_page(
             client,
             message.from_user.id,
-            file_id
-        ):
-            await message.reply("<b>❌ No such file exists</b>")
+            file_id,
+            chat_id
+        )
+
+        if result is None:
+            return await message.reply(
+                "<b>❌ Link generation failed. Please try again later</b>"
+            )
+
+        if result is False:
+            return await message.reply(
+                "<b>❌ No such file exists</b>"
+            )
 
         return
+
+    if not await send_file_to_user(
+        client,
+        message.from_user.id,
+        file_id
+    ):
+        await message.reply("<b>❌ No such file exists</b>")
