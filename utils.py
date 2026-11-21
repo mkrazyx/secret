@@ -222,25 +222,35 @@ async def is_subscribed(bot, query):
     return False
 
 async def broadcast_messages(user_id, message):
-    try:
-        await message.copy(chat_id=user_id)
-        return True, "Success"
-    except FloodWait as e:
-        await asyncio.sleep(e.x)
-        return await broadcast_messages(user_id, message)
-    except InputUserDeactivated:
-        await db.delete_user(int(user_id))
-        logging.info(f"{user_id}-Removed from Database, since deleted account.")
-        return False, "Deleted"
-    except UserIsBlocked:
-        logging.info(f"{user_id} -Blocked the bot.")
-        return False, "Blocked"
-    except PeerIdInvalid:
-        await db.delete_user(int(user_id))
-        logging.info(f"{user_id} - PeerIdInvalid")
-        return False, "Error"
-    except Exception as e:
-        return False, "Error"
+    user_id = int(user_id)
+
+    while True:
+        try:
+            await message.copy(chat_id=user_id)
+            return True, "Success"
+
+        except FloodWait as e:
+            wait = max(1, int(e.value))
+            logger.warning("Broadcast FloodWait: waiting %s seconds", wait)
+            await asyncio.sleep(wait + 1)
+
+        except InputUserDeactivated:
+            await db.delete_user(user_id)
+            logger.info("%s removed: deleted account", user_id)
+            return False, "Deleted"
+
+        except UserIsBlocked:
+            logger.info("%s blocked the bot", user_id)
+            return False, "Blocked"
+
+        except PeerIdInvalid:
+            await db.delete_user(user_id)
+            logger.info("%s removed: invalid peer", user_id)
+            return False, "Invalid Peer"
+
+        except Exception:
+            logger.exception("Broadcast failed for user %s", user_id)
+            return False, "Error"
 
 async def search_gagala(text):
 
