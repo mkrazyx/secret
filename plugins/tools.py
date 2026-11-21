@@ -50,14 +50,12 @@ async def broadcast_users(bot, message):
 
     BROADCAST_CANCEL.discard(("users", admin_id))
 
-    markup = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "❌ Cancel Broadcast",
-                callback_data=f"cancel_broadcast#{admin_id}"
-            )
-        ]
-    ])
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "❌ Cancel Broadcast",
+            callback_data=f"cancel_broadcast#{admin_id}"
+        )
+    ]])
 
     sts = await message.reply_text(
         f"<b>📢 Broadcast Started\n\n"
@@ -66,6 +64,8 @@ async def broadcast_users(bot, message):
     )
 
     success = 0
+    failed = 0
+    processed = 0
 
     users = await db.get_all_users()
 
@@ -73,33 +73,42 @@ async def broadcast_users(bot, message):
         if ("users", admin_id) in BROADCAST_CANCEL:
             break
 
-        sent, _ = await broadcast_messages(int(user["id"]), b_msg)
+        try:
+            sent, _ = await broadcast_messages(int(user["id"]), b_msg)
+            if sent:
+                success += 1
+            else:
+                failed += 1
+        except Exception:
+            logging.exception("Broadcast failed for %s", user.get("id"))
+            failed += 1
 
-        if sent:
-            success += 1
-        if success and success % 20 == 0:
-            await sts.edit_text(
+        processed += 1
+
+        if processed % 20 == 0:
+            await edit_text_safely(
+                sts,
                 f"<b>📡 Broadcasting...\n\n"
-                f"👥 Total Users: {total_users:,}\n"
-                f"✅ Sent: {success:,}</b>",
+                f"👥 Total: {total_users:,}\n"
+                f"📥 Processed: {processed:,}\n"
+                f"✅ Sent: {success:,}\n"
+                f"❌ Failed: {failed:,}</b>",
                 reply_markup=markup,
             )
+
+        await asyncio.sleep(0.1)
 
     cancelled = ("users", admin_id) in BROADCAST_CANCEL
     BROADCAST_CANCEL.discard(("users", admin_id))
 
-    if cancelled:
-        await sts.edit_text(
-            f"<b>🛑 Broadcast Cancelled\n\n"
-            f"👥 Total Users: {total_users:,}\n"
-            f"✅ Sent: {success:,}</b>"
-        )
-    else:
-        await sts.edit_text(
-            f"<b>✅ Broadcast Completed\n\n"
-            f"👥 Total Users: {total_users:,}\n"
-            f"✅ Sent: {success:,}</b>"
-        )
+    await edit_text_safely(
+        sts,
+        f"<b>{'🛑 Broadcast Cancelled' if cancelled else '✅ Broadcast Completed'}\n\n"
+        f"👥 Total: {total_users:,}\n"
+        f"📥 Processed: {processed:,}\n"
+        f"✅ Sent: {success:,}\n"
+        f"❌ Failed: {failed:,}</b>",
+    )
 
 @Client.on_callback_query(filters.regex(r"^cancel_broadcast#"))
 async def cancel_broadcast(bot, query):
